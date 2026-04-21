@@ -3,23 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "env -u __NEXT_PRIVATE_STANDALONE_CONFIG next dev",
+    "build": "env -u __NEXT_PRIVATE_STANDALONE_CONFIG next build",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "14.2.15",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "@babylonjs/core": "^7.34.0",
     "@babylonjs/gui": "^7.34.0",
-    "@babylonjs/loaders": "^7.34.0"
+    "@babylonjs/loaders": "^7.34.0",
+    "next": "^14.2.35",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/react": "^18.3.0",
+    "@types/node": "20.19.39",
+    "@types/react": "18.3.28",
     "@types/react-dom": "^18.3.0",
-    "typescript": "^5.4.0"
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^14.2.35",
+    "typescript": "5.9.3"
   }
 }

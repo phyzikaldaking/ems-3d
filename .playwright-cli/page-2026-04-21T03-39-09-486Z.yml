@@ -1,0 +1,20 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic:
+      - generic: Epic Music Space
+      - generic: The City
+      - generic: Drag to orbit · scroll to zoom · click a district
+    - generic:
+      - generic:
+        - generic: Trap Ave
+      - generic:
+        - generic: R&B Blvd
+      - generic:
+        - generic: Drill District
+      - generic:
+        - generic: Hip-Hop Highway
+      - generic:
+        - generic: Pop Plaza
+      - generic:
+        - generic: Afrobeats Alley
+  - alert [ref=e3]

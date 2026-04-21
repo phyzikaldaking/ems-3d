@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Read(//Users/phyzikaldaking/**)",
+      "Bash(env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build)",
+      "Bash(env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run dev)",
+      "Bash(curl -s http://localhost:3000 -o /dev/null -w \"%{http_code}\\\\n\")",
+      "Bash(kill %1)",
+      "Bash(curl -s http://localhost:54112 -o /dev/null -w \"%{http_code}\\\\n\")"
+    ]
+  }
+}
