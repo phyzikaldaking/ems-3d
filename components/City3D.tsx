@@ -90,16 +90,23 @@ function addWindowPlanes(
   bx: number, bz: number,
   shape: { w: number; d: number; h: number },
   floors: number,
-  id: string
+  id: string,
+  accent: Color3
 ): void {
-  const WIN_U = 0.5;
-  const WIN_V = 0.38;
+  const CELL = 32;
+  const COLS = 4;
+  const ROWS = 4;
+  const TEX  = CELL * COLS; // 128 px
+  const PAD  = 5;
+  const ar = Math.round(accent.r * 255);
+  const ag = Math.round(accent.g * 255);
+  const ab = Math.round(accent.b * 255);
 
   const faces: Array<{ suf: string; faceW: number; px: number; pz: number; ry: number }> = [
-    { suf: 'f', faceW: shape.w, px: bx,                      pz: bz - shape.d / 2 - 0.12, ry: Math.PI },
-    { suf: 'b', faceW: shape.w, px: bx,                      pz: bz + shape.d / 2 + 0.12, ry: 0 },
-    { suf: 'l', faceW: shape.d, px: bx - shape.w / 2 - 0.12, pz: bz,                      ry: -Math.PI / 2 },
-    { suf: 'r', faceW: shape.d, px: bx + shape.w / 2 + 0.12, pz: bz,                      ry:  Math.PI / 2 },
+    { suf: 'f', faceW: shape.w, px: bx,                       pz: bz - shape.d / 2 - 0.09, ry: Math.PI },
+    { suf: 'b', faceW: shape.w, px: bx,                       pz: bz + shape.d / 2 + 0.09, ry: 0 },
+    { suf: 'l', faceW: shape.d, px: bx - shape.w / 2 - 0.09, pz: bz,                       ry: -Math.PI / 2 },
+    { suf: 'r', faceW: shape.d, px: bx + shape.w / 2 + 0.09, pz: bz,                       ry:  Math.PI / 2 },
   ];
 
   faces.forEach(({ suf, faceW, px, pz, ry }) => {
@@ -108,22 +115,55 @@ function addWindowPlanes(
     plane.rotation.y = ry;
     plane.isPickable = false;
 
-    const t = new DynamicTexture(`wt-${id}-${suf}`, { width: 16, height: 16 }, scene, false);
+    const rng = seeded(hashString(id + suf + '9'));
+    const t   = new DynamicTexture(`wt-${id}-${suf}`, { width: TEX, height: TEX }, scene, false);
     t.wrapU = Texture.WRAP_ADDRESSMODE;
     t.wrapV = Texture.WRAP_ADDRESSMODE;
     const ctx = t.getContext() as unknown as CanvasRenderingContext2D;
-    ctx.fillStyle = '#05050b';
-    ctx.fillRect(0, 0, 16, 16);
-    ctx.fillStyle = 'rgba(255, 225, 140, 0.82)';
-    ctx.fillRect(3, 3, 10, 9);
+
+    // Dark wall background
+    ctx.fillStyle = '#07070f';
+    ctx.fillRect(0, 0, TEX, TEX);
+
+    // Per-cell window grid — seeded random lit / dark / tinted
+    for (let row = 0; row < ROWS; row++) {
+      for (let col = 0; col < COLS; col++) {
+        const cx = col * CELL + PAD;
+        const cy = row * CELL + PAD;
+        const cw = CELL - PAD * 2;
+        const ch = CELL - PAD * 2;
+        const rand = rng();
+        if (rand < 0.20) {
+          // Unlit window
+          ctx.fillStyle = 'rgba(8,8,14,0.95)';
+        } else {
+          const kind = rng();
+          if (kind < 0.12) {
+            // Cool blue-white (studio screen / late-night)
+            ctx.fillStyle = 'rgba(155,185,255,0.88)';
+          } else if (kind < 0.26) {
+            // Accent-tinted window
+            ctx.fillStyle = `rgba(${ar},${ag},${ab},0.72)`;
+          } else {
+            // Warm incandescent — slight per-cell variation
+            const wr = 215 + Math.round(rng() * 40);
+            const wg = 190 + Math.round(rng() * 30);
+            const wb  =  90 + Math.round(rng() * 55);
+            ctx.fillStyle = `rgba(${wr},${wg},${wb},0.84)`;
+          }
+        }
+        ctx.fillRect(cx, cy, cw, ch);
+      }
+    }
+
     t.update(false);
-    t.uScale = Math.max(1, Math.round(faceW * WIN_U));
-    t.vScale = Math.max(1, Math.round(floors * WIN_V));
+    t.uScale = Math.max(1, Math.round(faceW * 0.52));
+    t.vScale = Math.max(1, Math.round(floors * 0.40));
 
     const mat = new StandardMaterial(`wm-${id}-${suf}`, scene);
     mat.emissiveTexture = t;
-    mat.diffuseColor = Color3.Black();
-    mat.specularColor = Color3.Black();
+    mat.diffuseColor    = Color3.Black();
+    mat.specularColor   = Color3.Black();
     mat.backFaceCulling = true;
     plane.material = mat;
   });
@@ -241,6 +281,313 @@ function addRooftopDetails(
     dish.material = dishMat;
     dish.position.set(bx + shape.w * 0.2, topY + pH + 2.8, bz + shape.d * 0.2);
     dish.isPickable = false;
+  }
+}
+
+
+// ─── Horizontal glowing ledge bands around building ──────────────────────
+function addLedgeBands(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number,
+  accent: Color3
+): void {
+  if (shape.h < 10) return;
+  const overhang = 0.44;
+  const bandH    = 0.36;
+  const numBands = shape.h > 30 ? 3 : shape.h > 18 ? 2 : 1;
+
+  const mat = new StandardMaterial(`lb-mat-${building.id}`, scene);
+  mat.diffuseColor  = accent.scale(0.10);
+  mat.emissiveColor = accent.scale(0.24);
+  mat.specularColor = Color3.Black();
+
+  for (let i = 1; i <= numBands; i++) {
+    const bandY = (shape.h * i) / (numBands + 1);
+    const band  = MeshBuilder.CreateBox(`lb-${building.id}-${i}`, {
+      width:  shape.w + overhang * 2,
+      depth:  shape.d + overhang * 2,
+      height: bandH,
+    }, scene);
+    band.material = mat;
+    band.position.set(bx, bandY, bz);
+    band.isPickable = false;
+  }
+}
+
+// ─── AC unit clusters on rooftop ─────────────────────────────────────────
+function addACUnits(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number
+): void {
+  const topY  = shape.h + 0.65; // sit above parapet
+  const mat   = new StandardMaterial(`ac-mat-${building.id}`, scene);
+  mat.diffuseColor  = new Color3(0.16, 0.16, 0.20);
+  mat.specularColor = new Color3(0.28, 0.28, 0.32);
+  mat.emissiveColor = new Color3(0.014, 0.016, 0.024);
+
+  const rng   = seeded(hashString(building.id + 'ac'));
+  const count = 2 + Math.floor(rng() * 3);
+  const safeW = shape.w * 0.62;
+  const safeD = shape.d * 0.62;
+
+  for (let i = 0; i < count; i++) {
+    const ax = bx + (rng() - 0.5) * safeW;
+    const az = bz + (rng() - 0.5) * safeD;
+    const aw = 0.85 + rng() * 0.55;
+    const ad = 0.45 + rng() * 0.32;
+    const ah = 0.42 + rng() * 0.38;
+    const ac = MeshBuilder.CreateBox(`ac-${building.id}-${i}`, { width: aw, depth: ad, height: ah }, scene);
+    ac.material = mat;
+    ac.position.set(ax, topY + ah / 2, az);
+    ac.isPickable = false;
+  }
+}
+
+// ─── Lobby entrance protrusion at base ───────────────────────────────────
+function addBuildingLobby(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number,
+  accent: Color3
+): void {
+  const lobH = Math.min(shape.h * 0.13, 3.8);
+  const lobW = shape.w * 0.52;
+  const lobD = 0.9;
+  const lobZ = bz - shape.d / 2 - lobD / 2 + 0.05;
+
+  const lobMat = new StandardMaterial(`lob-mat-${building.id}`, scene);
+  lobMat.diffuseColor  = accent.scale(0.30);
+  lobMat.emissiveColor = accent.scale(0.14);
+  lobMat.specularColor = accent.scale(0.22);
+
+  const lob = MeshBuilder.CreateBox(`lob-${building.id}`, { width: lobW, depth: lobD, height: lobH }, scene);
+  lob.material = lobMat;
+  lob.position.set(bx, lobH / 2, lobZ);
+  lob.isPickable = false;
+
+  // Flat canopy overhang
+  const cMat = new StandardMaterial(`can-mat-${building.id}`, scene);
+  cMat.diffuseColor  = accent.scale(0.09);
+  cMat.emissiveColor = accent.scale(0.05);
+  cMat.specularColor = Color3.Black();
+  const can = MeshBuilder.CreateBox(`can-${building.id}`, { width: lobW + 1.0, depth: lobD + 0.7, height: 0.18 }, scene);
+  can.material = cMat;
+  can.position.set(bx, lobH + 0.09, lobZ - 0.25);
+  can.isPickable = false;
+
+  // Glowing door slit
+  const dH   = Math.min(lobH * 0.74, 2.6);
+  const dW   = Math.min(lobW * 0.26, 1.3);
+  const dMat = new StandardMaterial(`dor-mat-${building.id}`, scene);
+  dMat.diffuseColor  = Color3.Black();
+  dMat.emissiveColor = accent.scale(0.85);
+  dMat.specularColor = Color3.Black();
+  const door = MeshBuilder.CreatePlane(`dor-${building.id}`, { width: dW, height: dH }, scene);
+  door.material = dMat;
+  door.position.set(bx, dH / 2 + 0.02, lobZ - lobD / 2 - 0.04);
+  door.rotation.y = Math.PI;
+  door.isPickable = false;
+}
+
+// ─── Neon name sign on landmark front face ────────────────────────────────
+function addBuildingSign(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number,
+  accent: Color3
+): void {
+  const sigH = 2.4;
+  const sigW = Math.min(shape.w * 0.82, 13);
+  const sigY = shape.h * 0.76;
+  const sigZ = bz - shape.d / 2 - 0.16;
+
+  const ar = Math.round(accent.r * 255);
+  const ag = Math.round(accent.g * 255);
+  const ab = Math.round(accent.b * 255);
+
+  const tex = new DynamicTexture(`sig-tex-${building.id}`, { width: 512, height: 128 }, scene, false);
+  const ctx = tex.getContext() as unknown as CanvasRenderingContext2D;
+  ctx.clearRect(0, 0, 512, 128);
+
+  // Panel
+  ctx.fillStyle = 'rgba(4,4,10,0.82)';
+  ctx.fillRect(0, 0, 512, 128);
+
+  // Outer neon border
+  ctx.strokeStyle = `rgba(${ar},${ag},${ab},0.92)`;
+  ctx.lineWidth = 5;
+  ctx.strokeRect(5, 5, 502, 118);
+
+  // Inner accent line
+  ctx.strokeStyle = `rgba(${ar},${ag},${ab},0.35)`;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(11, 11, 490, 106);
+
+  // Building name
+  ctx.font = 'bold 50px Arial';
+  ctx.fillStyle = `rgb(${ar},${ag},${ab})`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(building.name.toUpperCase(), 256, 64);
+
+  tex.update(false);
+  tex.hasAlpha = true;
+
+  const plane = MeshBuilder.CreatePlane(`sig-${building.id}`, { width: sigW, height: sigH }, scene);
+  plane.position.set(bx, sigY, sigZ);
+  plane.rotation.y = Math.PI;
+  plane.isPickable = false;
+
+  const mat = new StandardMaterial(`sig-mat-${building.id}`, scene);
+  mat.diffuseTexture             = tex;
+  mat.emissiveTexture            = tex;
+  mat.diffuseColor               = Color3.Black();
+  mat.useAlphaFromDiffuseTexture = true;
+  mat.backFaceCulling            = false;
+  plane.material = mat;
+}
+
+// ─── Emissive ground glow disc under landmark ─────────────────────────────
+function addGroundGlow(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number,
+  accent: Color3
+): void {
+  const diam = Math.max(shape.w, shape.d) * 1.85;
+  const disc = MeshBuilder.CreateCylinder(`gd-${building.id}`, { height: 0.04, diameter: diam, tessellation: 32 }, scene);
+  disc.position.set(bx, 0.05, bz);
+  disc.isPickable = false;
+
+  const mat = new StandardMaterial(`gd-mat-${building.id}`, scene);
+  mat.diffuseColor  = Color3.Black();
+  mat.emissiveColor = accent.scale(0.30);
+  mat.specularColor = Color3.Black();
+  mat.alpha = 0.58;
+  disc.material = mat;
+}
+
+// ─── Road corridors between districts ────────────────────────────────────
+function createRoads(scene: Scene): void {
+  const { TILE_SIZE, TILE_GAP, GRID_COLS, GRID_ROWS } = CITY;
+  const stride  = TILE_SIZE + TILE_GAP;
+  const totalW  = GRID_COLS * TILE_SIZE + (GRID_COLS - 1) * TILE_GAP;
+  const totalH  = GRID_ROWS * TILE_SIZE + (GRID_ROWS - 1) * TILE_GAP;
+  const originX = -totalW / 2;
+  const originZ = -totalH / 2;
+
+  const roadMat = new StandardMaterial('road-mat', scene);
+  roadMat.diffuseColor  = new Color3(0.04, 0.04, 0.06);
+  roadMat.emissiveColor = new Color3(0.008, 0.008, 0.012);
+  roadMat.specularColor = Color3.Black();
+
+  const dashMat = new StandardMaterial('road-dash', scene);
+  dashMat.diffuseColor  = Color3.Black();
+  dashMat.emissiveColor = new Color3(0.36, 0.32, 0.12);
+  dashMat.specularColor = Color3.Black();
+
+  // Vertical corridors (between district columns)
+  for (let col = 0; col < GRID_COLS - 1; col++) {
+    const rx = originX + (col + 1) * stride - TILE_GAP / 2;
+    const road = MeshBuilder.CreateGround(`vrd-${col}`, { width: TILE_GAP, height: totalH }, scene);
+    road.material = roadMat;
+    road.position.set(rx, 0.02, 0);
+    road.isPickable = false;
+    const dashes = Math.floor(totalH / 10);
+    for (let i = 0; i < dashes; i++) {
+      const dash = MeshBuilder.CreateBox(`vdsh-${col}-${i}`, { width: 0.14, depth: 4.2, height: 0.04 }, scene);
+      dash.material = dashMat;
+      dash.position.set(rx, 0.05, originZ + i * 10 + 5);
+      dash.isPickable = false;
+    }
+  }
+
+  // Horizontal corridors (between district rows)
+  for (let row = 0; row < GRID_ROWS - 1; row++) {
+    const rz = originZ + (row + 1) * stride - TILE_GAP / 2;
+    const road = MeshBuilder.CreateGround(`hrd-${row}`, { width: totalW, height: TILE_GAP }, scene);
+    road.material = roadMat;
+    road.position.set(0, 0.02, rz);
+    road.isPickable = false;
+    const dashes = Math.floor(totalW / 10);
+    for (let i = 0; i < dashes; i++) {
+      const dash = MeshBuilder.CreateBox(`hdsh-${row}-${i}`, { width: 4.2, depth: 0.14, height: 0.04 }, scene);
+      dash.material = dashMat;
+      dash.position.set(originX + i * 10 + 5, 0.05, rz);
+      dash.isPickable = false;
+    }
+  }
+}
+
+// ─── Street lamp posts along road corridors ───────────────────────────────
+function createStreetLamps(scene: Scene): void {
+  const { TILE_SIZE, TILE_GAP, GRID_COLS, GRID_ROWS } = CITY;
+  const stride  = TILE_SIZE + TILE_GAP;
+  const totalW  = GRID_COLS * TILE_SIZE + (GRID_COLS - 1) * TILE_GAP;
+  const totalH  = GRID_ROWS * TILE_SIZE + (GRID_ROWS - 1) * TILE_GAP;
+  const originX = -totalW / 2;
+  const originZ = -totalH / 2;
+
+  const poleMat = new StandardMaterial('sl-pole', scene);
+  poleMat.diffuseColor  = new Color3(0.10, 0.10, 0.13);
+  poleMat.specularColor = new Color3(0.22, 0.22, 0.26);
+
+  const bulbMat = new StandardMaterial('sl-bulb', scene);
+  bulbMat.diffuseColor  = Color3.White();
+  bulbMat.emissiveColor = new Color3(1.0, 0.91, 0.72);
+  bulbMat.specularColor = Color3.Black();
+
+  let lpIdx = 0;
+  const placeLamp = (x: number, z: number, armRight: boolean) => {
+    const H   = 6.5;
+    const idx = lpIdx++;
+    const dir = armRight ? 1 : -1;
+
+    const pole = MeshBuilder.CreateCylinder(`slp-${idx}`, { height: H, diameter: 0.17, tessellation: 6 }, scene);
+    pole.material = poleMat;
+    pole.position.set(x, H / 2, z);
+    pole.isPickable = false;
+
+    const arm = MeshBuilder.CreateBox(`sla-${idx}`, { width: 1.4, depth: 0.12, height: 0.12 }, scene);
+    arm.material = poleMat;
+    arm.position.set(x + dir * 0.7, H - 0.22, z);
+    arm.isPickable = false;
+
+    const bulb = MeshBuilder.CreateSphere(`slb-${idx}`, { diameter: 0.46 }, scene);
+    bulb.material = bulbMat;
+    bulb.position.set(x + dir * 1.4, H - 0.10, z);
+    bulb.isPickable = false;
+  };
+
+  const SPACING = 16;
+
+  // Along vertical road corridors
+  for (let col = 0; col < GRID_COLS - 1; col++) {
+    const rx = originX + (col + 1) * stride - TILE_GAP / 2;
+    const steps = Math.floor(totalH / SPACING);
+    for (let i = 0; i <= steps; i++) {
+      const lz = originZ + i * SPACING;
+      placeLamp(rx - TILE_GAP * 0.55, lz, true);
+      placeLamp(rx + TILE_GAP * 0.55, lz, false);
+    }
+  }
+
+  // Along horizontal road corridors
+  for (let row = 0; row < GRID_ROWS - 1; row++) {
+    const rz = originZ + (row + 1) * stride - TILE_GAP / 2;
+    const steps = Math.floor(totalW / SPACING);
+    for (let i = 0; i <= steps; i++) {
+      const lx = originX + i * SPACING;
+      placeLamp(lx, rz - TILE_GAP * 0.55, true);
+      placeLamp(lx, rz + TILE_GAP * 0.55, false);
+    }
   }
 }
 
@@ -505,12 +852,16 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
 
         buildingPositions.current[building.id] = { x: bx, z: bz };
 
-        // Window overlays & rooftop details
-        addWindowPlanes(scene, bx, bz, { w, d, h }, building.floors, building.id);
+        // Window overlays, ledge bands, rooftop & ground details
+        addWindowPlanes(scene, bx, bz, { w, d, h }, building.floors, building.id, accent);
+        addLedgeBands(scene, building, { w, d, h }, bx, bz, accent);
         addRooftopDetails(scene, building, { w, d, h }, bx, bz, accent);
+        addACUnits(scene, building, { w, d, h }, bx, bz);
+        addBuildingLobby(scene, building, { w, d, h }, bx, bz, accent);
 
-        // Track landmark materials for pulse animation
         if (building.isLandmark) {
+          addBuildingSign(scene, building, { w, d, h }, bx, bz, accent);
+          addGroundGlow(scene, building, { w, d, h }, bx, bz, accent);
           landmarkMats.push({ mat: bMat, base: bMat.emissiveColor.clone() });
         }
 
@@ -531,7 +882,9 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
       });
     });
 
-    // ── Atmosphere & post-effects ─────────────────────────────────────────
+    // ── Infrastructure & atmosphere ───────────────────────────────────────
+    createRoads(scene);
+    createStreetLamps(scene);
     createStarfield(scene);
     DISTRICTS.forEach((d) => createDistrictLabel(scene, d));
 
