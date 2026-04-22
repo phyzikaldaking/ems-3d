@@ -10,12 +10,15 @@ import {
   Vector3,
   Color3,
   Color4,
+  Mesh,
   MeshBuilder,
   StandardMaterial,
   PointerEventTypes,
   ActionManager,
   ExecuteCodeAction,
   GlowLayer,
+  DefaultRenderingPipeline,
+  ShadowGenerator,
   Animation,
   CubicEase,
   EasingFunction,
@@ -30,6 +33,7 @@ import { type NavigationState } from '@/lib/navigation';
 interface City3DProps {
   navigationState: NavigationState;
   onNavigate: (state: NavigationState) => void;
+  onReady?: () => void;
 }
 
 interface BuildingMeta {
@@ -453,6 +457,89 @@ function addBuildingSign(
   plane.material = mat;
 }
 
+// ─── Pulsing activity beacon orb above live buildings ────────────────────────
+interface BeaconEntry {
+  mesh: Mesh;
+  mat: StandardMaterial;
+  base: Color3;
+  bx: number; bz: number; baseY: number;
+  phase: number; speed: number;
+}
+
+function addActivityBeacon(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number,
+  accent: Color3,
+  entries: BeaconEntry[]
+): void {
+  const baseY = shape.h + 0.65 + 5.8;
+  const beaconColor =
+    building.type === 'studio' ? new Color3(1.0, 0.62, 0.08)
+    : building.type === 'club' ? accent
+    :                            new Color3(0.14, 0.95, 0.54);
+
+  const mat = new StandardMaterial(`bcn-mat-${building.id}`, scene);
+  mat.diffuseColor  = Color3.Black();
+  mat.emissiveColor = beaconColor.scale(0.8);
+  mat.specularColor = Color3.Black();
+
+  const orb: Mesh = MeshBuilder.CreateSphere(`bcn-${building.id}`, { diameter: 0.62 }, scene);
+  orb.material = mat;
+  orb.position.set(bx, baseY, bz);
+  orb.isPickable = false;
+
+  const phase = (hashString(building.id + 'bcn') >>> 0) / 0xffffffff * Math.PI * 2;
+  const speed = building.type === 'club' ? 2.9 : building.type === 'studio' ? 2.3 : 1.7;
+  entries.push({ mesh: orb, mat, base: beaconColor, bx, bz, baseY, phase, speed });
+}
+
+// ─── Drone traffic orbiting the city ─────────────────────────────────────────
+function createDroneTraffic(scene: Scene): void {
+  const configs: Array<{ radius: number; speed: number; height: number; phase: number }> = [
+    { radius: 122, speed:  0.18, height: 58, phase: 0.0 },
+    { radius:  82, speed: -0.24, height: 44, phase: 1.2 },
+    { radius: 148, speed:  0.14, height: 68, phase: 2.4 },
+    { radius:  58, speed:  0.31, height: 36, phase: 3.7 },
+    { radius: 105, speed: -0.11, height: 72, phase: 4.8 },
+  ];
+
+  const drones = configs.map((cfg, i) => {
+    const bodyMat = new StandardMaterial(`drn-mat-${i}`, scene);
+    bodyMat.diffuseColor  = Color3.Black();
+    bodyMat.emissiveColor = new Color3(0.68, 0.74, 1.0);
+    bodyMat.specularColor = Color3.Black();
+    const body: Mesh = MeshBuilder.CreateBox(`drn-body-${i}`, { width: 1.2, depth: 0.38, height: 0.18 }, scene);
+    body.material = bodyMat;
+    body.isPickable = false;
+
+    const lightMat = new StandardMaterial(`drn-lm-${i}`, scene);
+    lightMat.diffuseColor  = Color3.Black();
+    lightMat.emissiveColor = new Color3(1, 0.1, 0.1);
+    lightMat.specularColor = Color3.Black();
+    const orb: Mesh = MeshBuilder.CreateSphere(`drn-orb-${i}`, { diameter: 0.22 }, scene);
+    orb.material = lightMat;
+    orb.isPickable = false;
+
+    return { body, orb, lightMat, ...cfg };
+  });
+
+  scene.registerBeforeRender(() => {
+    const t = performance.now() / 1000;
+    drones.forEach(({ body, orb, lightMat, radius, speed, height, phase }) => {
+      const angle = t * speed + phase;
+      const px = Math.cos(angle) * radius;
+      const pz = Math.sin(angle) * radius;
+      body.position.set(px, height, pz);
+      body.rotation.y = -angle + Math.PI / 2;
+      orb.position.set(px, height + 0.19, pz);
+      const blink = Math.sin(t * 3.8 + phase) > 0.45 ? 1.1 : 0.07;
+      lightMat.emissiveColor = new Color3(blink, blink * 0.09, blink * 0.09);
+    });
+  });
+}
+
 // ─── Emissive ground glow disc under landmark ─────────────────────────────
 function addGroundGlow(
   scene: Scene,
@@ -705,7 +792,7 @@ function animateCamera(
   }
 }
 
-export default function City3D({ navigationState, onNavigate }: City3DProps) {
+export default function City3D({ navigationState, onNavigate, onReady }: City3DProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<Engine | null>(null);
   const cameraRef = useRef<ArcRotateCamera | null>(null);
@@ -719,6 +806,9 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
 
   const navigationStateRef = useRef(navigationState);
   useEffect(() => { navigationStateRef.current = navigationState; }, [navigationState]);
+
+  const onReadyRef = useRef(onReady);
+  useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
   // ── Scene setup (runs once) ──────────────────────────────────────────────
   useEffect(() => {
@@ -751,8 +841,31 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
     sun.intensity = 0.9;
     sun.diffuse = new Color3(1, 0.95, 0.85);
 
+    // ── Atmospheric fog ────────────────────────────────────────
+    scene.fogMode    = Scene.FOGMODE_EXP2;
+    scene.fogDensity = 0.007;
+    scene.fogColor   = new Color3(0.03, 0.03, 0.07);
+
+    // ── Shadow generator (landmark buildings only for perf) ────────────
+    const shadowGen = new ShadowGenerator(512, sun);
+    shadowGen.useBlurExponentialShadowMap = true;
+    shadowGen.blurKernel = 16;
+
     const glow = new GlowLayer('glow', scene);
     glow.intensity = 0.7;
+
+    // ── Post-processing pipeline ────────────────────────────────────────
+    const pipeline = new DefaultRenderingPipeline('pipeline', true, scene, [camera]);
+    pipeline.bloomEnabled = true;
+    pipeline.bloomThreshold = 0.22;
+    pipeline.bloomWeight = 0.55;
+    pipeline.bloomKernel = 64;
+    pipeline.bloomScale = 0.5;
+    pipeline.chromaticAberrationEnabled = true;
+    pipeline.chromaticAberration.aberrationAmount = 12;
+    pipeline.grainEnabled = true;
+    pipeline.grain.intensity = 6;
+    pipeline.grain.animated = true;
 
     // Ground plane
     const ocean = MeshBuilder.CreateGround('ocean', { width: 700, height: 700 }, scene);
@@ -761,9 +874,12 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
     oceanMat.specularColor = Color3.Black();
     ocean.material = oceanMat;
     ocean.position.y = -0.2;
+    ocean.receiveShadows = true;
 
     // ── Build districts ──────────────────────────────────────────────────
     const landmarkMats: Array<{ mat: StandardMaterial; base: Color3 }> = [];
+    const flickerMats:  Array<{ mat: StandardMaterial; base: Color3; seed: number }> = [];
+    const beaconEntries: BeaconEntry[] = [];
 
     DISTRICTS.forEach((district) => {
       const { x, z } = districtCenter(district);
@@ -863,6 +979,18 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
           addBuildingSign(scene, building, { w, d, h }, bx, bz, accent);
           addGroundGlow(scene, building, { w, d, h }, bx, bz, accent);
           landmarkMats.push({ mat: bMat, base: bMat.emissiveColor.clone() });
+          shadowGen.addShadowCaster(mesh);
+        }
+
+        // Activity beacon above studios, rooms, and clubs
+        if (building.type === 'studio' || building.type === 'room' || building.type === 'club') {
+          addActivityBeacon(scene, building, { w, d, h }, bx, bz, accent, beaconEntries);
+        }
+
+        // Erratic neon flicker on clubs + non-landmark studios
+        if (building.type === 'club' || (building.type === 'studio' && !building.isLandmark)) {
+          const seed = (hashString(building.id + 'flk') >>> 0) / 0xffffffff;
+          flickerMats.push({ mat: bMat, base: bMat.emissiveColor.clone(), seed });
         }
 
         // Hover
@@ -887,12 +1015,31 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
     createStreetLamps(scene);
     createStarfield(scene);
     DISTRICTS.forEach((d) => createDistrictLabel(scene, d));
+    createDroneTraffic(scene);
 
-    // Pulse landmark building emissive
+    // Pulse / flicker / beacon animations
     scene.registerBeforeRender(() => {
       const t = performance.now() / 1000;
+
+      // Smooth landmark pulse
       landmarkMats.forEach(({ mat, base }, i) => {
         mat.emissiveColor = base.scale(1 + 0.28 * Math.sin(t * 1.5 + i * 0.85));
+      });
+
+      // Erratic neon flicker on clubs & secondary studios
+      flickerMats.forEach(({ mat, base, seed }) => {
+        const f = 0.76
+          + 0.13 * Math.sin(t * 2.4  + seed * 10)
+          + 0.07 * Math.sin(t * 5.9  + seed *  7)
+          + 0.04 * Math.sin(t * 11.3 + seed *  3);
+        mat.emissiveColor = base.scale(Math.max(0.22, f));
+      });
+
+      // Floating beacon pulse
+      beaconEntries.forEach(({ mesh, mat, base, bx, bz, baseY, phase, speed }) => {
+        mesh.position.set(bx, baseY + 0.55 * Math.sin(t * 1.35 + phase), bz);
+        const pulse = 0.32 + 0.68 * Math.abs(Math.sin(t * speed + phase));
+        mat.emissiveColor = base.scale(0.35 + 1.25 * pulse);
       });
     });
 
@@ -968,7 +1115,14 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
       }
     });
 
-    engine.runRenderLoop(() => scene.render());
+    let firstFrame = true;
+    engine.runRenderLoop(() => {
+      scene.render();
+      if (firstFrame) {
+        firstFrame = false;
+        onReadyRef.current?.();
+      }
+    });
 
     const handleResize = () => engine.resize();
     window.addEventListener('resize', handleResize);
@@ -1015,15 +1169,7 @@ export default function City3D({ navigationState, onNavigate }: City3DProps) {
   return (
     <canvas
       ref={canvasRef}
-      style={{
-        width: '100vw',
-        height: '100vh',
-        display: 'block',
-        outline: 'none',
-        touchAction: 'none',
-        filter: navigationState.mode === 'interior' ? 'blur(4px) brightness(0.5)' : 'none',
-        transition: 'filter 0.4s ease',
-      }}
+      className={`city-canvas${navigationState.mode === 'interior' ? ' city-canvas--interior' : ''}`}
     />
   );
 }
