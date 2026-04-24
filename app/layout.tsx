@@ -1,10 +1,30 @@
 import type { Metadata, Viewport } from 'next';
 import { Analytics } from '@vercel/analytics/next';
 
+const siteUrl = 'https://ems-3d.vercel.app';
+
 export const metadata: Metadata = {
   title: 'Epic MusicSpace — The City',
   description:
     'The Las Vegas Strip of the music industry. A walkable metaverse city with districts for every genre.',
+  metadataBase: new URL(siteUrl),
+  openGraph: {
+    title: 'Epic MusicSpace — The City',
+    description:
+      'The Las Vegas Strip of the music industry. A walkable metaverse city with districts for every genre.',
+    url: siteUrl,
+    siteName: 'Epic MusicSpace',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Epic MusicSpace — The City',
+    description:
+      'The Las Vegas Strip of the music industry. A walkable metaverse city with districts for every genre.',
+  },
+  icons: {
+    icon: '/favicon.svg',
+  },
 };
 
 export const viewport: Viewport = {

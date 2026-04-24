@@ -37,6 +37,9 @@ export default function HUD() {
         <div style={{ fontSize: 13, opacity: 0.7, marginTop: 4 }}>
           Drag to orbit · scroll to zoom · click a building
         </div>
+        <div style={{ fontSize: 11, opacity: 0.45, marginTop: 2 }}>
+          On mobile: one finger to orbit · pinch to zoom
+        </div>
       </div>
 
       <div

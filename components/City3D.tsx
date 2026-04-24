@@ -34,6 +34,7 @@ export interface BuildingPickPayload {
 
 interface City3DProps {
   onPickBuilding: (payload: BuildingPickPayload) => void;
+  onSceneReady?: () => void;
 }
 
 /**
@@ -48,7 +49,7 @@ function seeded(seed: number): () => number {
   };
 }
 
-export default function City3D({ onPickBuilding }: City3DProps) {
+export default function City3D({ onPickBuilding, onSceneReady }: City3DProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<Engine | null>(null);
 
@@ -240,6 +241,9 @@ export default function City3D({ onPickBuilding }: City3DProps) {
 
     engine.runRenderLoop(() => scene.render());
 
+    // Signal the parent that the first frame has been rendered.
+    scene.executeWhenReady(() => onSceneReady?.());
+
     const handleResize = () => engine.resize();
     window.addEventListener('resize', handleResize);
     canvas.style.cursor = 'grab';
@@ -250,7 +254,7 @@ export default function City3D({ onPickBuilding }: City3DProps) {
       engine.dispose();
       engineRef.current = null;
     };
-  }, [onPickBuilding]);
+  }, [onPickBuilding, onSceneReady]);
 
   return (
     <canvas

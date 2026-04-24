@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="14" fill="#0a0a10"/>
+  <!-- City skyline silhouette -->
+  <rect x="8"  y="36" width="8"  height="20" fill="#B026FF"/>
+  <rect x="18" y="28" width="6"  height="28" fill="#FF3D8A"/>
+  <rect x="26" y="32" width="7"  height="24" fill="#2EE6D6"/>
+  <rect x="35" y="24" width="6"  height="32" fill="#FFB800"/>
+  <rect x="43" y="30" width="7"  height="26" fill="#FF6B35"/>
+  <rect x="52" y="38" width="6"  height="18" fill="#3DFF74"/>
+  <!-- Ground line -->
+  <rect x="4"  y="55" width="56" height="2"  fill="#f4f4f880"/>
+</svg>
