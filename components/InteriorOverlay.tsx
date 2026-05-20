@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { DISTRICTS } from '@/lib/districts';
 import { BUILDING_TYPE_ICONS, type NavigationState } from '@/lib/navigation';
+import { trackEvent } from '@/lib/telemetry';
 import {
   getArtistByBuilding,
   getStudioSessions,
@@ -17,6 +18,15 @@ import {
 // ─── Shared sub-components ────────────────────────────────────────────────
 
 interface FlowStepsProps { steps: string[]; current: number; }
+
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+function isLikelyUrl(value: string) {
+  const trimmed = value.trim();
+  return /^https?:\/\//i.test(trimmed) || trimmed.startsWith('www.');
+}
 
 function FlowSteps({ steps, current }: FlowStepsProps) {
   return (
@@ -88,6 +98,7 @@ function StudioContent({ buildingId }: { buildingId: string }) {
 
   const rate = selected?.ratePerHour ?? 120;
   const total = rate * hours;
+  const emailValid = isValidEmail(email);
 
   return (
     <div>
@@ -219,6 +230,9 @@ function StudioContent({ buildingId }: { buildingId: string }) {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                 />
+                {email.trim() && !emailValid && (
+                  <span className="flow-input-hint flow-input-hint--error">Enter a valid email so the booking confirmation can be delivered.</span>
+                )}
               </div>
             </div>
           </div>
@@ -228,8 +242,17 @@ function StudioContent({ buildingId }: { buildingId: string }) {
             <button
               type="button"
               className="int-btn"
-              disabled={!name.trim() || !email.trim()}
-              onClick={() => setStep('success')}
+              disabled={!name.trim() || !emailValid}
+              onClick={() => {
+                trackEvent('booking_confirmed', {
+                  buildingId,
+                  roomId: selected?.roomId,
+                  slot,
+                  hours,
+                  total,
+                });
+                setStep('success');
+              }}
             >
               Confirm · ${total}
             </button>
@@ -340,7 +363,7 @@ function RoomContent({ buildingId }: { buildingId: string }) {
           {[
             `${np.artist} — Unreleased Track`,
             'Freestyle Session (Open)',
-            'DJ Set · TBA',
+            'DJ Set · Guest host pending',
           ].map((item, i) => (
             <div key={item} className="queue-item">
               <span>{item}</span>
@@ -383,13 +406,73 @@ function MarketplaceContent({ buildingId }: { buildingId: string }) {
   const [step, setStep]                   = useState<CheckoutStep>('browse');
   const [activeListing, setActiveListing] = useState<MarketplaceListing | null>(null);
   const [licenseKey, setLicenseKey]       = useState('basic');
-  const [cardName, setCardName]           = useState('');
-  const [cardEmail, setCardEmail]         = useState('');
-  const [cardNum, setCardNum]             = useState('');
+  const [loading, setLoading]             = useState(false);
+  const [checkoutError, setCheckoutError] = useState('');
+  const [checkoutMode, setCheckoutMode]   = useState<'ready' | 'unavailable'>('ready');
   const [ref] = useState(`ORD-${Math.floor(10000 + Math.random() * 89999)}`);
 
   const tiers = activeListing ? LICENSE_TIERS(activeListing) : [];
   const selectedTier = tiers.find((t) => t.key === licenseKey);
+
+  async function handleStripeCheckout() {
+    if (!activeListing) return;
+    setLoading(true);
+    setCheckoutError('');
+    trackEvent('checkout_started', {
+      buildingId,
+      listingId: activeListing.id,
+      tier: licenseKey,
+      price: selectedTier?.price,
+    });
+
+    try {
+      const res = await fetch('/api/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tier: licenseKey,
+          trackName: activeListing.name,
+          producer: activeListing.producer,
+          origin: window.location.origin,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.checkoutUrl) {
+        trackEvent('checkout_failed', {
+          buildingId,
+          listingId: activeListing.id,
+          tier: licenseKey,
+          status: res.status,
+          reason: data.error ?? 'missing-checkout-url',
+        });
+        setCheckoutMode(res.status === 503 ? 'unavailable' : 'ready');
+        setCheckoutError(
+          res.status === 503
+            ? 'Stripe is not configured for this environment yet. The licensing flow is live, but card checkout is currently offline.'
+            : data.error ?? 'Checkout unavailable. Try again.',
+        );
+        setLoading(false);
+        return;
+      }
+
+      setCheckoutMode('ready');
+      trackEvent('checkout_redirected', {
+        buildingId,
+        listingId: activeListing.id,
+        tier: licenseKey,
+      });
+      window.location.href = data.checkoutUrl;
+    } catch {
+      trackEvent('checkout_failed', {
+        buildingId,
+        listingId: activeListing.id,
+        tier: licenseKey,
+        reason: 'network-error',
+      });
+      setCheckoutError('Network error. Please try again.');
+      setLoading(false);
+    }
+  }
 
   return (
     <div>
@@ -459,43 +542,27 @@ function MarketplaceContent({ buildingId }: { buildingId: string }) {
       {step === 'payment' && activeListing && (
         <div className="step-pane">
           <FlowSteps steps={['Browse', 'License', 'Payment']} current={2} />
-          <div className="payment-summary" style={{ marginBottom: 16 }}>
+          <div className="payment-summary" style={{ marginBottom: 24 }}>
             <span>{activeListing.name} · {selectedTier?.name}</span>
             <span className="payment-price">{selectedTier?.price}</span>
           </div>
-          <div className="flow-form">
-            <div className="int-form-row">
-              <div className="flow-form-field">
-                <label className="flow-label" htmlFor="pay-name">Name</label>
-                <input id="pay-name" className="flow-input" placeholder="Full name" value={cardName} onChange={(e) => setCardName(e.target.value)} />
-              </div>
-              <div className="flow-form-field">
-                <label className="flow-label" htmlFor="pay-email">Email</label>
-                <input id="pay-email" className="flow-input" type="email" placeholder="you@example.com" value={cardEmail} onChange={(e) => setCardEmail(e.target.value)} />
-              </div>
-            </div>
-            <div className="flow-form-field">
-              <label className="flow-label" htmlFor="pay-card">Card Number</label>
-              <input
-                id="pay-card"
-                className="flow-input flow-input--mono"
-                placeholder="4242 4242 4242 4242"
-                maxLength={19}
-                value={cardNum}
-                onChange={(e) => setCardNum(e.target.value)}
-              />
-              <span className="flow-input-hint">Secure mock checkout · No real charges</span>
-            </div>
+          <div className="payment-note">
+            You&apos;ll be redirected to Stripe to complete payment securely, then returned to the city with purchase confirmation.
           </div>
+          {checkoutError && (
+            <div className={`flow-alert ${checkoutMode === 'unavailable' ? 'flow-alert--warning' : 'flow-alert--error'}`}>
+              {checkoutError}
+            </div>
+          )}
           <div className="int-btn-row int-btn-row--mt">
-            <button type="button" className="int-btn int-btn--outline" onClick={() => setStep('license')}>Back</button>
+            <button type="button" className="int-btn int-btn--outline" onClick={() => { setStep('license'); setCheckoutError(''); }}>Back</button>
             <button
               type="button"
               className="int-btn"
-              disabled={!cardName.trim() || !cardEmail.trim() || cardNum.length < 4}
-              onClick={() => setStep('success')}
+              disabled={loading}
+              onClick={handleStripeCheckout}
             >
-              Pay {selectedTier?.price}
+              {loading ? 'Redirecting…' : `Pay ${selectedTier?.price} via Stripe`}
             </button>
           </div>
         </div>
@@ -582,7 +649,17 @@ function ApartmentContent({ buildingId, buildingName }: { buildingId: string; bu
               ))}
             </div>
           )}
-          <button type="button" className="int-btn int-btn--full int-btn--mt" onClick={() => setStep('followed')}>
+          <button
+            type="button"
+            className="int-btn int-btn--full int-btn--mt"
+            onClick={() => {
+              trackEvent('artist_followed', {
+                buildingId,
+                artist: displayName,
+              });
+              setStep('followed');
+            }}
+          >
             + Follow {displayName}
           </button>
         </div>
@@ -647,6 +724,7 @@ function LabelContent({ buildingId }: { buildingId: string }) {
 
   const STEP_LABELS = ['Roster', 'Track', 'Artist', 'Message', 'Review'];
   const stepIndex: Record<DemoStep, number> = { roster: 0, track: 1, 'artist-info': 2, message: 3, review: 4, success: 5 };
+  const trackLinkValid = isLikelyUrl(trackLink);
 
   return (
     <div>
@@ -693,6 +771,9 @@ function LabelContent({ buildingId }: { buildingId: string }) {
             <div className="flow-form-field">
               <label className="flow-label" htmlFor="demo-link">Stream / Download Link</label>
               <input id="demo-link" className="flow-input" placeholder="SoundCloud, YouTube, Drive…" value={trackLink} onChange={(e) => setLink(e.target.value)} />
+              {trackLink.trim() && !trackLinkValid && (
+                <span className="flow-input-hint flow-input-hint--error">Use a full link so A&amp;R can review the track without follow-up.</span>
+              )}
             </div>
             <div className="int-form-row">
               <div className="flow-form-field">
@@ -707,7 +788,7 @@ function LabelContent({ buildingId }: { buildingId: string }) {
           </div>
           <div className="int-btn-row int-btn-row--mt">
             <button type="button" className="int-btn int-btn--outline" onClick={() => setStep('roster')}>Back</button>
-            <button type="button" className="int-btn" disabled={!trackName.trim() || !trackLink.trim()} onClick={() => setStep('artist-info')}>Next</button>
+            <button type="button" className="int-btn" disabled={!trackName.trim() || !trackLinkValid} onClick={() => setStep('artist-info')}>Next</button>
           </div>
         </div>
       )}
@@ -772,7 +853,20 @@ function LabelContent({ buildingId }: { buildingId: string }) {
           </div>
           <div className="int-btn-row int-btn-row--mt">
             <button type="button" className="int-btn int-btn--outline" onClick={() => setStep('message')}>Back</button>
-            <button type="button" className="int-btn" onClick={() => setStep('success')}>Submit Demo</button>
+            <button
+              type="button"
+              className="int-btn"
+              onClick={() => {
+                trackEvent('demo_submitted', {
+                  buildingId,
+                  genre: trackGenre || 'unspecified',
+                  hasSocial: Boolean(socialHandle.trim()),
+                });
+                setStep('success');
+              }}
+            >
+              Submit Demo
+            </button>
           </div>
         </div>
       )}
@@ -826,9 +920,14 @@ function ClubContent({ buildingId }: { buildingId: string }) {
   const [tier, setTier]           = useState('free');
   const [email, setEmail]         = useState('');
   const [ref] = useState(`MBR-${Math.floor(10000 + Math.random() * 89999)}`);
+  const emailValid = isValidEmail(email);
 
   const handleRsvp = (eventId: string) => {
     setRsvpEvent(eventId);
+    trackEvent('rsvp_confirmed', {
+      buildingId,
+      eventId,
+    });
     setStep('success');
   };
 
@@ -903,11 +1002,25 @@ function ClubContent({ buildingId }: { buildingId: string }) {
             <div className="flow-form-field">
               <label className="flow-label" htmlFor="club-email">Email Address</label>
               <input id="club-email" className="flow-input" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+              {email.trim() && !emailValid && (
+                <span className="flow-input-hint flow-input-hint--error">Enter a valid email for ticket updates and membership receipts.</span>
+              )}
             </div>
           </div>
           <div className="int-btn-row int-btn-row--mt">
             <button type="button" className="int-btn int-btn--outline" onClick={() => setStep('tiers')}>Back</button>
-            <button type="button" className="int-btn" disabled={!email.trim()} onClick={() => setStep('success')}>
+            <button
+              type="button"
+              className="int-btn"
+              disabled={!emailValid}
+              onClick={() => {
+                trackEvent('membership_started', {
+                  buildingId,
+                  tier,
+                });
+                setStep('success');
+              }}
+            >
               Join
             </button>
           </div>
@@ -919,7 +1032,7 @@ function ClubContent({ buildingId }: { buildingId: string }) {
           <div className="success-icon">✓</div>
           <h3 className="success-title">
             {rsvpEvent
-              ? `You&apos;re In — ${events.find((e) => e.id === rsvpEvent)?.name}`
+              ? `You're In — ${events.find((e) => e.id === rsvpEvent)?.name}`
               : `${MEMBERSHIP_TIERS.find((t) => t.key === tier)?.name} Membership Active`}
           </h3>
           <p className="success-desc">
@@ -942,6 +1055,54 @@ interface Props {
 }
 
 export default function InteriorOverlay({ nav, onClose }: Props) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (nav.mode !== 'interior') return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const focusables = () =>
+      Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((node) => !node.hasAttribute('disabled'));
+
+    window.setTimeout(() => {
+      focusables()[0]?.focus();
+    }, 0);
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+
+      const nodes = focusables();
+      if (nodes.length === 0) return;
+
+      const active = document.activeElement as HTMLElement | null;
+      const index = active ? nodes.indexOf(active) : -1;
+
+      event.preventDefault();
+      if (event.shiftKey) {
+        nodes[(index <= 0 ? nodes.length : index) - 1]?.focus();
+      } else {
+        nodes[(index + 1) % nodes.length]?.focus();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [nav.mode, onClose]);
+
   if (nav.mode !== 'interior') return null;
 
   const district  = nav.districtId   ? DISTRICTS.find((d) => d.id === nav.districtId) : null;
@@ -950,7 +1111,7 @@ export default function InteriorOverlay({ nav, onClose }: Props) {
 
   return (
     <div className={`int-overlay theme-${nav.districtId ?? 'hiphop-hwy'}`} role="dialog" aria-modal="true" aria-label={nav.buildingName ?? 'Building'}>
-      <div className="int-panel">
+      <div className="int-panel" ref={dialogRef}>
         <div className="int-header">
           <div className="int-header-copy">
             <p className="int-district-label">

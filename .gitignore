@@ -9,3 +9,4 @@ build/
 .vercel
 next-env.d.ts.bak
 .playwright-cli/
+tsconfig.tsbuildinfo

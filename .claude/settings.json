@@ -7,7 +7,15 @@
       "Bash(env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run dev)",
       "Bash(curl -s http://localhost:3000 -o /dev/null -w \"%{http_code}\\\\n\")",
       "Bash(kill %1)",
-      "Bash(curl -s http://localhost:54112 -o /dev/null -w \"%{http_code}\\\\n\")"
+      "Bash(curl -s http://localhost:54112 -o /dev/null -w \"%{http_code}\\\\n\")",
+      "Bash(curl -s https://epicmusicspace.com/api/health)",
+      "Bash(curl -sI https://epicmusicspace.com)",
+      "Bash(curl -s https://www.epicmusicspace.com/api/health)",
+      "Bash(curl -sL https://www.epicmusicspace.com/api/health)",
+      "Bash(curl -sL https://epicmusicspace.com/api/health)",
+      "Bash(~/ .npm-global/bin/vercel alias ls)",
+      "Bash(curl -sI https://ems-3d-twgljmrci-phyzikaldakings-projects.vercel.app)",
+      "Bash(curl -sL https://epicmusicspace.com)"
     ]
   }
 }

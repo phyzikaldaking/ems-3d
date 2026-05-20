@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { DISTRICTS } from '@/lib/districts';
 
 export const ONBOARDING_KEY = 'ems-seen-v1';
@@ -17,13 +17,13 @@ const SLIDES: Slide[] = [
     id: 'welcome',
     eyebrow: 'Welcome',
     headline: 'Epic MusicSpace',
-    copy: 'The music industry, built as a 3D city. Studios. Labels. Clubs. Marketplaces. Everything is a real place you can walk into.',
+    copy: 'The music industry reimagined as a 3D city, where studios, labels, clubs, and marketplaces become real spaces you can enter.',
   },
   {
     id: 'city',
     eyebrow: 'The World',
-    headline: 'A city that works for your music career.',
-    copy: 'Book studio sessions. Buy and sell beats. Submit demos to labels. Join listening rooms and events. Spatial, interactive, and built for scale.',
+    headline: 'A city built for the business of music.',
+    copy: 'Book studio time, license beats, submit demos, and join fan experiences inside one premium 3D platform.',
   },
   {
     id: 'districts',
@@ -35,7 +35,7 @@ const SLIDES: Slide[] = [
     id: 'spaces',
     eyebrow: "What's Inside",
     headline: 'Studios. Labels. Clubs. Markets.',
-    copy: 'Walk into buildings to book sessions, buy beats, follow artists, submit demos, and join events. The city is the product.',
+    copy: 'Each building is a product surface with real actions, clearer value, and a path from discovery to revenue.',
   },
   {
     id: 'enter',
@@ -61,6 +61,7 @@ interface Props {
 export default function Onboarding({ onComplete }: Props) {
   const [current, setCurrent] = useState(0);
   const [exiting, setExiting] = useState(false);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
 
   const finish = useCallback(() => {
     try { localStorage.setItem(ONBOARDING_KEY, '1'); } catch { /* unavailable */ }
@@ -77,7 +78,39 @@ export default function Onboarding({ onComplete }: Props) {
   }, [current, finish]);
 
   useEffect(() => {
+    const focusables = () =>
+      Array.from(
+        dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((el) => !el.hasAttribute('disabled'));
+
+    const initialFocus = dialogRef.current?.querySelector<HTMLButtonElement>('.onboarding-skip');
+    initialFocus?.focus();
+
     const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        const nodes = focusables();
+        if (nodes.length === 0) return;
+
+        const active = document.activeElement as HTMLElement | null;
+        if (!active || !dialogRef.current?.contains(active)) {
+          e.preventDefault();
+          nodes[0]?.focus();
+          return;
+        }
+
+        const index = nodes.indexOf(active);
+        if (index === -1) return;
+
+        e.preventDefault();
+        const nextIndex = e.shiftKey
+          ? (index - 1 + nodes.length) % nodes.length
+          : (index + 1) % nodes.length;
+        nodes[nextIndex]?.focus();
+        return;
+      }
+
       if (e.key === 'ArrowRight' || e.key === 'Enter' || e.key === ' ') advance();
       if (e.key === 'Escape') finish();
     };
@@ -90,6 +123,7 @@ export default function Onboarding({ onComplete }: Props) {
 
   return (
     <div
+      ref={dialogRef}
       className={`onboarding ${exiting ? 'onboarding--exit' : ''}`}
       role="dialog"
       aria-modal="true"

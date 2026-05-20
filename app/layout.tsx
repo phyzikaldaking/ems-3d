@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from 'next';
 import { IBM_Plex_Mono, Space_Grotesk } from 'next/font/google';
 
 import './globals.css';
+import { getSiteOrigin } from '@/lib/env';
 
 const headlineFont = Space_Grotesk({
   subsets: ['latin'],
@@ -15,10 +16,13 @@ const monoFont = IBM_Plex_Mono({
   weight: ['400', '500', '600'],
 });
 
+const siteOrigin = getSiteOrigin();
+
 export const metadata: Metadata = {
   title: 'Epic MusicSpace — The City',
   description:
     'A premium, walkable music-industry city with genre districts, artist infrastructure, and 3D discovery built for scale.',
+  metadataBase: siteOrigin ? new URL(siteOrigin) : undefined,
   keywords: [
     'music metaverse',
     'artist platform',
@@ -44,6 +48,7 @@ export const viewport: Viewport = {
   themeColor: '#0a0a10',
   width: 'device-width',
   initialScale: 1,
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

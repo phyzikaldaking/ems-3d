@@ -147,14 +147,12 @@ export const CITY = {
 } as const
 
 export function districtCenter(district: District): { x: number; z: number } {
-  const { TILE_SIZE, TILE_GAP, GRID_COLS, GRID_ROWS } = CITY
-  const stride = TILE_SIZE + TILE_GAP
-  const totalW = GRID_COLS * TILE_SIZE + (GRID_COLS - 1) * TILE_GAP
-  const totalH = GRID_ROWS * TILE_SIZE + (GRID_ROWS - 1) * TILE_GAP
-  const originX = -totalW / 2 + TILE_SIZE / 2
-  const originZ = -totalH / 2 + TILE_SIZE / 2
+  const index = Math.max(0, DISTRICTS.findIndex((entry) => entry.id === district.id))
+  const angle = -Math.PI / 2 + (index / DISTRICTS.length) * Math.PI * 2
+  const radius = 86
+
   return {
-    x: originX + district.grid[0] * stride,
-    z: originZ + district.grid[1] * stride,
+    x: Math.cos(angle) * radius,
+    z: Math.sin(angle) * radius,
   }
 }

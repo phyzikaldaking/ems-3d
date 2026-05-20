@@ -8,7 +8,7 @@ interface LoadingScreenProps {
 
 export default function LoadingScreen({ ready }: LoadingScreenProps) {
   const [exiting, setExiting] = useState(false);
-  const [gone,    setGone]    = useState(false);
+  const [gone, setGone] = useState(false);
   const [progress, setProgress] = useState(0);
 
   // Simulate incremental progress until ready
@@ -40,8 +40,9 @@ export default function LoadingScreen({ ready }: LoadingScreenProps) {
       aria-label="Loading Epic MusicSpace"
     >
       <div className="loading-inner">
+        <span className="loading-badge">Epic MusicSpace</span>
         <p className="loading-logo">EMS</p>
-        <p className="loading-eyebrow">Epic MusicSpace · City OS</p>
+        <p className="loading-eyebrow">CITY OS</p>
         <div
           className="loading-bar"
           role="progressbar"
@@ -52,7 +53,10 @@ export default function LoadingScreen({ ready }: LoadingScreenProps) {
           <div className="loading-bar-fill" style={{ width: `${progress}%` }} />
         </div>
         <p className="loading-label">
-          {ready ? 'Entering the city…' : 'Building the city…'}
+          {ready ? 'Entering the city...' : 'Preparing districts, landmarks, and interiors...'}
+        </p>
+        <p className="loading-subcopy">
+          Premium 3D navigation for studios, labels, commerce, and fan experiences.
         </p>
       </div>
     </div>

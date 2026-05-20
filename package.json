@@ -6,22 +6,29 @@
     "dev": "env -u __NEXT_PRIVATE_STANDALONE_CONFIG next dev",
     "build": "env -u __NEXT_PRIVATE_STANDALONE_CONFIG next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test:smoke": "playwright test",
+    "check:env": "node scripts/check-env.mjs",
+    "check:env:strict": "node scripts/check-env.mjs --strict",
+    "prelaunch": "npm run lint && npm run typecheck && npm run build && npm run test:smoke"
   },
   "dependencies": {
     "@babylonjs/core": "^7.34.0",
     "@babylonjs/gui": "^7.34.0",
     "@babylonjs/loaders": "^7.34.0",
-    "next": "^14.2.35",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "next": "^15.3.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "stripe": "^17.2.0"
   },
   "devDependencies": {
-    "@types/node": "20.19.39",
-    "@types/react": "18.3.28",
-    "@types/react-dom": "^18.3.0",
-    "eslint": "^8.57.1",
-    "eslint-config-next": "^14.2.35",
+    "@playwright/test": "^1.59.1",
+    "@types/node": "22.15.3",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "eslint": "^9.26.0",
+    "eslint-config-next": "^15.3.1",
     "typescript": "5.9.3"
   }
 }

@@ -1,83 +1,55 @@
-# EMS (Epic Music Space) — Production Readiness Blueprint
+# EMS Production Readiness Blueprint
 
-## Current repository state
+## Current State
 
-This repository now contains a working front-end prototype:
+This repository now contains a launch-oriented Epic MusicSpace city experience:
 
 - Next.js App Router shell
-- Babylon.js 3D city experience
-- typed district/building content model
-- HUD and interior overlays
-- GitHub Actions validation for install, lint, and production build
+- Babylon.js 3D city scene with lite rendering mode
+- typed district, building, and navigation models
+- HUD, onboarding, minimap, and interior overlays
+- marketplace checkout API backed by Stripe configuration
+- live studio data proxy API with timeout and payload validation
+- runtime health endpoint at `/api/health`
+- branded error and not-found fallbacks
+- CI prelaunch validation
 
-The current scope is still **front-end only**. There is no backend, auth layer, persistence layer, deployment config, or runtime observability stack in this repo yet.
+## Production-Ready Now
 
----
+- Client/server separation is in place for Babylon.js.
+- Core city navigation has typed state and deep-link support.
+- Interior flows cover booking, licensing, demo submission, membership, listening rooms, and artist follow actions.
+- Checkout and live studio APIs degrade cleanly when env vars or upstream systems are unavailable.
+- Mobile overlays, reduced-motion behavior, and lite rendering mode are accounted for.
+- Build, lint, and typecheck are bundled into `npm run prelaunch`.
 
-## What is production-ready now
+## Current Risks
 
-1. **Build validation exists**
-   - GitHub Actions now checks install, lint, and production build on push and PR.
+- No automated browser smoke tests exist yet.
+- Stripe and live EMS data must still be validated against production credentials.
+- Analytics env vars are documented, but client-side telemetry is not wired yet.
+- Auth, persistence, order fulfillment, booking storage, and demo submission storage still need real backend ownership.
 
-2. **Client/server separation is correct**
-   - Babylon scene code is loaded client-side only, which prevents SSR/runtime crashes.
+## Recommended Next Steps
 
-3. **Navigation model is typed**
-   - District/building content and navigation state are centralized and strongly typed.
+1. Add Playwright smoke coverage for city load, search, district navigation, building entry, and one interior flow.
+2. Wire client telemetry for load time, city navigation events, checkout errors, and interior conversions.
+3. Promote marketplace, booking, membership, and demo actions from local UI state to durable backend records.
+4. Add production monitoring for `/api/health`, checkout failures, and studio feed failures.
+5. Test the deployed site on physical iPhone and Android devices before investor demos.
 
-4. **Basic UX flow is coherent**
-   - City → district → building → interior transitions now behave predictably.
-
----
-
-## Current risks and gaps
-
-1. **No automated UI or interaction tests**
-   - Rendering and interaction regressions can still slip through despite lint/build passing.
-
-2. **No deployment/runtime config**
-   - There is no Vercel/Netlify/Render deployment definition, preview workflow, or environment policy.
-
-3. **No application telemetry**
-   - Errors, performance, and engagement cannot yet be observed in production.
-
-4. **No backend or identity model**
-   - All marketplace, session, fan club, and artist interactions are static placeholders.
-
----
-
-## Recommended next steps
-
-### 1) Front-end hardening
-- Add Playwright smoke coverage for city load, district zoom, building selection, and interior entry.
-- Add a reduced-motion fallback and mobile interaction pass.
-- Add an error boundary around the interactive shell.
-
-### 2) Platform baseline
-- Add preview deployment on pull requests.
-- Add Dependabot or Renovate for dependency patching.
-- Add secret scanning and dependency audit gates in CI.
-
-### 3) Product architecture
-- Introduce `apps/api` or equivalent backend surface.
-- Define auth roles for listener, artist, moderator, and admin.
-- Move mock building/interior content behind typed API contracts.
-
-### 4) Observability
-- Add client error tracking.
-- Capture Web Vitals and route performance.
-- Define logging, alerting, and rollback expectations before launch.
-
----
-
-## Launch checklist
+## Launch Checklist
 
 - [x] Project builds in CI
 - [x] Project lints in CI
-- [x] Core city navigation works locally
+- [x] Typecheck is part of prelaunch validation
+- [x] Runtime health endpoint exists
+- [x] Branded app error screen exists
+- [x] Branded not-found screen exists
+- [x] Required env vars are documented
 - [ ] UI smoke tests exist
-- [ ] Production hosting is configured
-- [ ] Dependency update policy is automated
-- [ ] Error monitoring is configured
-- [ ] Backend/API contracts exist
-- [ ] Auth and permissions are defined
+- [ ] Production env vars are configured
+- [ ] Stripe checkout is tested with production or test-mode credentials
+- [ ] Live studio feed is tested against deployed EMS API
+- [ ] Client telemetry is configured
+- [ ] Backend persistence is defined for booking, demos, and memberships

@@ -7,36 +7,39 @@ import {
   ArcRotateCamera,
   HemisphericLight,
   DirectionalLight,
+  PointLight,
   Vector3,
   Color3,
   Color4,
   Mesh,
   MeshBuilder,
+  PBRMaterial,
   StandardMaterial,
-  PointerEventTypes,
-  ActionManager,
-  ExecuteCodeAction,
   GlowLayer,
   DefaultRenderingPipeline,
+  SSAO2RenderingPipeline,
   ShadowGenerator,
-  Animation,
-  CubicEase,
-  EasingFunction,
   DynamicTexture,
   Texture,
   ParticleSystem,
+  ImageProcessingConfiguration,
+  ReflectionProbe,
 } from '@babylonjs/core';
 
 import { DISTRICTS, CITY, districtCenter, type BuildingType, type BuildingDef, type DistrictId, type District } from '@/lib/districts';
-import { type NavigationState } from '@/lib/navigation';
 
-interface City3DProps {
-  navigationState: NavigationState;
-  onNavigate: (state: NavigationState) => void;
-  onReady?: () => void;
+export interface LiveStudio {
+  username: string;
+  name: string;
+  image: string | null;
+  district: 'LABEL_ROW' | 'DOWNTOWN_PRIME' | 'INDIE_BLOCKS';
+  level: number;
+  avgScore: number;
+  songCount: number;
+  totalSold: number;
 }
 
-interface BuildingMeta {
+export interface BuildingMeta {
   buildingId: string;
   buildingType: BuildingType;
   buildingName: string;
@@ -45,12 +48,32 @@ interface BuildingMeta {
   floors: number;
 }
 
+interface City3DProps {
+  onProximityBuilding: (meta: BuildingMeta | null) => void;
+  onReady?: () => void;
+  liveStudios?: LiveStudio[];
+}
+
+type RenderProfile = 'full' | 'lite';
+
+interface NavigatorWithConnection extends Navigator {
+  connection?: { saveData?: boolean };
+}
+
 function seeded(seed: number): () => number {
   let s = seed >>> 0 || 1;
   return () => {
     s = (s * 1664525 + 1013904223) >>> 0;
     return s / 0xffffffff;
   };
+}
+
+function getRenderProfile(): RenderProfile {
+  if (typeof window === 'undefined') return 'full';
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const isCompactViewport = window.innerWidth <= 900;
+  const saveData = (navigator as NavigatorWithConnection).connection?.saveData === true;
+  return prefersReducedMotion || isCompactViewport || saveData ? 'lite' : 'full';
 }
 
 function hashString(s: string): number {
@@ -76,19 +99,196 @@ function getBuildingShape(b: BuildingDef): { w: number; d: number; h: number } {
   }
 }
 
-function getEmissiveScale(type: BuildingType): number {
+function createBuildingPBR(
+  name: string,
+  scene: Scene,
+  type: BuildingType,
+  isLandmark: boolean,
+  accent: Color3
+): PBRMaterial {
+  const mat = new PBRMaterial(name, scene);
+  mat.useRadianceOverAlpha = false;
+  mat.useSpecularOverAlpha = false;
+  mat.environmentIntensity  = 0.18;
+  mat.specularIntensity     = 1.0;
+
   switch (type) {
-    case 'studio':      return 0.18;
-    case 'label':       return 0.22;
-    case 'club':        return 0.20;
-    case 'room':        return 0.12;
-    case 'marketplace': return 0.13;
-    case 'apartment':   return 0.05;
-    default:            return 0.08;
+    case 'studio': {
+      mat.albedoColor   = new Color3(0.04, 0.06, 0.12).add(accent.scale(0.06));
+      mat.metallic      = isLandmark ? 0.88 : 0.74;
+      mat.roughness     = isLandmark ? 0.07 : 0.14;
+      mat.emissiveColor = accent.scale(isLandmark ? 0.24 : 0.16);
+      break;
+    }
+    case 'label': {
+      mat.albedoColor   = new Color3(0.02, 0.02, 0.04).add(accent.scale(0.04));
+      mat.metallic      = isLandmark ? 0.96 : 0.82;
+      mat.roughness     = isLandmark ? 0.05 : 0.11;
+      mat.emissiveColor = accent.scale(isLandmark ? 0.28 : 0.20);
+      break;
+    }
+    case 'club': {
+      mat.albedoColor   = new Color3(0.05, 0.03, 0.08).add(accent.scale(0.12));
+      mat.metallic      = 0.30;
+      mat.roughness     = 0.60;
+      mat.emissiveColor = accent.scale(0.30);
+      break;
+    }
+    case 'marketplace': {
+      mat.albedoColor   = new Color3(0.07, 0.07, 0.09);
+      mat.metallic      = 0.12;
+      mat.roughness     = 0.82;
+      mat.emissiveColor = accent.scale(0.09);
+      break;
+    }
+    case 'apartment': {
+      mat.albedoColor   = new Color3(0.09, 0.07, 0.08).add(accent.scale(0.04));
+      mat.metallic      = 0.04;
+      mat.roughness     = 0.92;
+      mat.emissiveColor = accent.scale(0.04);
+      break;
+    }
+    case 'room': {
+      mat.albedoColor   = new Color3(0.05, 0.06, 0.10);
+      mat.metallic      = 0.32;
+      mat.roughness     = 0.65;
+      mat.emissiveColor = accent.scale(0.10);
+      break;
+    }
+    default: {
+      mat.albedoColor   = new Color3(0.05, 0.05, 0.08);
+      mat.metallic      = 0.28;
+      mat.roughness     = 0.65;
+      mat.emissiveColor = accent.scale(0.08);
+    }
   }
+
+  return mat;
 }
 
-// ─── Window overlay planes per building face ──────────────────────────────
+interface CompoundResult {
+  base: Mesh;
+  all: Mesh[];
+  podShape: { w: number; d: number; h: number };
+}
+
+function buildCompoundMeshes(
+  scene: Scene,
+  building: BuildingDef,
+  shape: { w: number; d: number; h: number },
+  bx: number, bz: number,
+  mat: PBRMaterial
+): CompoundResult {
+  const { w, d, h } = shape;
+
+  if (building.isLandmark && h >= 18) {
+    const podH   = h * 0.26;
+    const towerH = h * 0.52;
+    const crownH = h - podH - towerH;
+
+    const pod = MeshBuilder.CreateBox(`bldg-${building.id}`, { width: w, depth: d, height: podH }, scene);
+    pod.material = mat;
+    pod.position.set(bx, podH / 2, bz);
+    pod.receiveShadows = true;
+    pod.checkCollisions = true;
+
+    const tower = MeshBuilder.CreateBox(`part-twr-${building.id}`, { width: w * 0.70, depth: d * 0.70, height: towerH }, scene);
+    tower.material = mat;
+    tower.position.set(bx, podH + towerH / 2, bz);
+    tower.isPickable   = false;
+    tower.receiveShadows = true;
+    tower.checkCollisions = true;
+
+    const crown = MeshBuilder.CreateBox(`part-crw-${building.id}`, { width: w * 0.48, depth: d * 0.48, height: crownH }, scene);
+    crown.material = mat;
+    crown.position.set(bx, podH + towerH + crownH / 2, bz);
+    crown.isPickable   = false;
+    crown.receiveShadows = true;
+
+    return {
+      base: pod,
+      all: [pod, tower, crown],
+      podShape: { w, d, h: podH },
+    };
+  }
+
+  if ((building.type === 'studio' || building.type === 'label') && h >= 14) {
+    const baseH = h * 0.38;
+    const topH  = h - baseH;
+
+    const base = MeshBuilder.CreateBox(`bldg-${building.id}`, { width: w, depth: d, height: baseH }, scene);
+    base.material = mat;
+    base.position.set(bx, baseH / 2, bz);
+    base.receiveShadows = true;
+    base.checkCollisions = true;
+
+    const top = MeshBuilder.CreateBox(`part-top-${building.id}`, { width: w * 0.80, depth: d * 0.80, height: topH }, scene);
+    top.material = mat;
+    top.position.set(bx, baseH + topH / 2, bz);
+    top.isPickable   = false;
+    top.receiveShadows = true;
+    top.checkCollisions = true;
+
+    return {
+      base,
+      all: [base, top],
+      podShape: { w, d, h: baseH },
+    };
+  }
+
+  const mesh = MeshBuilder.CreateBox(`bldg-${building.id}`, { width: w, depth: d, height: h }, scene);
+  mesh.material = mat;
+  mesh.position.set(bx, h / 2, bz);
+  mesh.receiveShadows = true;
+  mesh.checkCollisions = true;
+
+  return { base: mesh, all: [mesh], podShape: { w, d, h } };
+}
+
+function createSkyDome(scene: Scene): void {
+  const sky = MeshBuilder.CreateSphere('skydome', { diameter: 950, segments: 8 }, scene);
+  sky.isPickable = false;
+
+  const tex = new DynamicTexture('sky-tex', { width: 4, height: 512 }, scene, false);
+  const ctx = tex.getContext() as unknown as CanvasRenderingContext2D;
+  const grad = ctx.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0.00, '#000006');
+  grad.addColorStop(0.22, '#01010d');
+  grad.addColorStop(0.48, '#040215');
+  grad.addColorStop(0.68, '#0c0622');
+  grad.addColorStop(0.82, '#180b30');
+  grad.addColorStop(0.92, '#0f0619');
+  grad.addColorStop(1.00, '#080412');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 4, 512);
+  tex.update(false);
+
+  const mat = new StandardMaterial('sky-mat', scene);
+  mat.emissiveTexture  = tex;
+  mat.diffuseColor     = Color3.Black();
+  mat.specularColor    = Color3.Black();
+  mat.backFaceCulling  = false;
+  mat.disableLighting  = true;
+  sky.material = mat;
+}
+
+function createHorizonGlow(scene: Scene): void {
+  const ring = MeshBuilder.CreateTorus('horizon-glow', {
+    diameter: 600,
+    thickness: 90,
+    tessellation: 48,
+  }, scene);
+  ring.position.y = -20;
+  ring.isPickable = false;
+
+  const mat = new StandardMaterial('horizon-mat', scene);
+  mat.diffuseColor  = Color3.Black();
+  mat.emissiveColor = new Color3(0.12, 0.06, 0.22);
+  mat.specularColor = Color3.Black();
+  mat.alpha         = 0.18;
+  ring.material     = mat;
+}
+
 function addWindowPlanes(
   scene: Scene,
   bx: number, bz: number,
@@ -100,7 +300,7 @@ function addWindowPlanes(
   const CELL = 32;
   const COLS = 4;
   const ROWS = 4;
-  const TEX  = CELL * COLS; // 128 px
+  const TEX  = CELL * COLS;
   const PAD  = 5;
   const ar = Math.round(accent.r * 255);
   const ag = Math.round(accent.g * 255);
@@ -125,11 +325,9 @@ function addWindowPlanes(
     t.wrapV = Texture.WRAP_ADDRESSMODE;
     const ctx = t.getContext() as unknown as CanvasRenderingContext2D;
 
-    // Dark wall background
-    ctx.fillStyle = '#07070f';
+    ctx.fillStyle = '#040408';
     ctx.fillRect(0, 0, TEX, TEX);
 
-    // Per-cell window grid — seeded random lit / dark / tinted
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         const cx = col * CELL + PAD;
@@ -137,23 +335,19 @@ function addWindowPlanes(
         const cw = CELL - PAD * 2;
         const ch = CELL - PAD * 2;
         const rand = rng();
-        if (rand < 0.20) {
-          // Unlit window
-          ctx.fillStyle = 'rgba(8,8,14,0.95)';
+        if (rand < 0.18) {
+          ctx.fillStyle = 'rgba(6,6,10,0.97)';
         } else {
           const kind = rng();
-          if (kind < 0.12) {
-            // Cool blue-white (studio screen / late-night)
-            ctx.fillStyle = 'rgba(155,185,255,0.88)';
-          } else if (kind < 0.26) {
-            // Accent-tinted window
-            ctx.fillStyle = `rgba(${ar},${ag},${ab},0.72)`;
+          if (kind < 0.10) {
+            ctx.fillStyle = 'rgba(140,170,255,0.90)';
+          } else if (kind < 0.24) {
+            ctx.fillStyle = `rgba(${ar},${ag},${ab},0.75)`;
           } else {
-            // Warm incandescent — slight per-cell variation
-            const wr = 215 + Math.round(rng() * 40);
-            const wg = 190 + Math.round(rng() * 30);
-            const wb  =  90 + Math.round(rng() * 55);
-            ctx.fillStyle = `rgba(${wr},${wg},${wb},0.84)`;
+            const wr = 218 + Math.round(rng() * 37);
+            const wg = 192 + Math.round(rng() * 28);
+            const wb  =  88 + Math.round(rng() * 52);
+            ctx.fillStyle = `rgba(${wr},${wg},${wb},0.86)`;
           }
         }
         ctx.fillRect(cx, cy, cw, ch);
@@ -173,7 +367,6 @@ function addWindowPlanes(
   });
 }
 
-// ─── Type-specific rooftop features ──────────────────────────────────────
 function addRooftopDetails(
   scene: Scene,
   building: BuildingDef,
@@ -185,10 +378,11 @@ function addRooftopDetails(
   const pH = 0.65;
   const pW = 0.35;
 
-  const rfMat = new StandardMaterial(`rf-${building.id}`, scene);
-  rfMat.diffuseColor = accent.scale(0.22);
+  const rfMat = new PBRMaterial(`rf-${building.id}`, scene);
+  rfMat.albedoColor   = accent.scale(0.18);
   rfMat.emissiveColor = accent.scale(0.10);
-  rfMat.specularColor = Color3.Black();
+  rfMat.metallic      = 0.6;
+  rfMat.roughness     = 0.35;
 
   const mkBox = (n: string, w: number, d: number, h: number, x: number, z: number) => {
     const b = MeshBuilder.CreateBox(n, { width: w, depth: d, height: h }, scene);
@@ -198,18 +392,18 @@ function addRooftopDetails(
     return b;
   };
 
-  // Parapet border walls
-  mkBox(`prt-n-${building.id}`, shape.w,           pW, pH, bx,                     bz - shape.d / 2 + pW / 2);
-  mkBox(`prt-s-${building.id}`, shape.w,           pW, pH, bx,                     bz + shape.d / 2 - pW / 2);
-  mkBox(`prt-w-${building.id}`, pW, shape.d - pW * 2, pH, bx - shape.w / 2 + pW / 2, bz);
-  mkBox(`prt-e-${building.id}`, pW, shape.d - pW * 2, pH, bx + shape.w / 2 - pW / 2, bz);
+  mkBox(`prt-n-${building.id}`, shape.w,               pW, pH, bx,                         bz - shape.d / 2 + pW / 2);
+  mkBox(`prt-s-${building.id}`, shape.w,               pW, pH, bx,                         bz + shape.d / 2 - pW / 2);
+  mkBox(`prt-w-${building.id}`, pW, shape.d - pW * 2,  pH, bx - shape.w / 2 + pW / 2,     bz);
+  mkBox(`prt-e-${building.id}`, pW, shape.d - pW * 2,  pH, bx + shape.w / 2 - pW / 2,     bz);
 
   if (building.type === 'studio') {
-    const antMat = new StandardMaterial(`ant-mat-${building.id}`, scene);
-    antMat.diffuseColor = Color3.Black();
-    antMat.emissiveColor = accent.scale(0.45);
-    antMat.specularColor = Color3.Black();
-    const antH = building.isLandmark ? 8 : 5;
+    const antMat = new PBRMaterial(`ant-mat-${building.id}`, scene);
+    antMat.albedoColor   = Color3.Black();
+    antMat.emissiveColor = accent.scale(0.55);
+    antMat.metallic      = 0.9;
+    antMat.roughness     = 0.1;
+    const antH = building.isLandmark ? 9 : 5.5;
     const offsets = building.isLandmark
       ? [[-shape.w * 0.22, 0], [shape.w * 0.22, shape.d * 0.1]] as [number, number][]
       : [[0, 0]] as [number, number][];
@@ -218,10 +412,12 @@ function addRooftopDetails(
       ant.material = antMat;
       ant.position.set(bx + ox, topY + pH + antH / 2, bz + oz);
       ant.isPickable = false;
-      const litMat = new StandardMaterial(`antlit-mat-${building.id}-${i}`, scene);
-      litMat.emissiveColor = new Color3(1, 0.12, 0.12);
-      litMat.diffuseColor = Color3.Black();
-      const lit = MeshBuilder.CreateSphere(`antlit-${building.id}-${i}`, { diameter: 0.35 }, scene);
+      const litMat = new PBRMaterial(`antlit-mat-${building.id}-${i}`, scene);
+      litMat.emissiveColor = new Color3(1, 0.10, 0.10);
+      litMat.albedoColor   = Color3.Black();
+      litMat.metallic      = 0.0;
+      litMat.roughness     = 1.0;
+      const lit = MeshBuilder.CreateSphere(`antlit-${building.id}-${i}`, { diameter: 0.38 }, scene);
       lit.material = litMat;
       lit.position.set(bx + ox, topY + pH + antH + 0.18, bz + oz);
       lit.isPickable = false;
@@ -229,53 +425,56 @@ function addRooftopDetails(
   }
 
   if (building.type === 'label' && building.isLandmark) {
-    const spireMat = new StandardMaterial(`spire-mat-${building.id}`, scene);
-    spireMat.diffuseColor = Color3.Black();
-    spireMat.emissiveColor = accent.scale(0.65);
-    spireMat.specularColor = Color3.Black();
-    const spireH = 13;
-    const spire = MeshBuilder.CreateCylinder(`spire-${building.id}`, { height: spireH, diameterTop: 0.04, diameterBottom: 0.8, tessellation: 8 }, scene);
+    const spireMat = new PBRMaterial(`spire-mat-${building.id}`, scene);
+    spireMat.albedoColor   = Color3.Black();
+    spireMat.emissiveColor = accent.scale(0.75);
+    spireMat.metallic      = 0.95;
+    spireMat.roughness     = 0.05;
+    const spireH = 15;
+    const spire = MeshBuilder.CreateCylinder(`spire-${building.id}`, { height: spireH, diameterTop: 0.03, diameterBottom: 0.75, tessellation: 8 }, scene);
     spire.material = spireMat;
     spire.position.set(bx, topY + pH + spireH / 2, bz);
     spire.isPickable = false;
   }
 
   if (building.type === 'club') {
-    const ringMat = new StandardMaterial(`ring-mat-${building.id}`, scene);
-    ringMat.diffuseColor = Color3.Black();
+    const ringMat = new PBRMaterial(`ring-mat-${building.id}`, scene);
+    ringMat.albedoColor   = Color3.Black();
     ringMat.emissiveColor = accent;
-    ringMat.specularColor = Color3.Black();
+    ringMat.metallic      = 0.7;
+    ringMat.roughness     = 0.12;
     const ringDiam = Math.min(shape.w, shape.d) * 0.68;
-    const ring = MeshBuilder.CreateTorus(`ring-${building.id}`, { diameter: ringDiam, thickness: 0.5, tessellation: 28 }, scene);
+    const ring = MeshBuilder.CreateTorus(`ring-${building.id}`, { diameter: ringDiam, thickness: 0.5, tessellation: 32 }, scene);
     ring.material = ringMat;
     ring.position.set(bx, topY + pH + 0.55, bz);
     ring.isPickable = false;
   }
 
   if (building.type === 'apartment') {
-    const tankMat = new StandardMaterial(`tank-mat-${building.id}`, scene);
-    tankMat.diffuseColor = accent.scale(0.18);
+    const tankMat = new PBRMaterial(`tank-mat-${building.id}`, scene);
+    tankMat.albedoColor   = accent.scale(0.15);
     tankMat.emissiveColor = accent.scale(0.06);
-    tankMat.specularColor = Color3.Black();
+    tankMat.metallic      = 0.55;
+    tankMat.roughness     = 0.45;
     const tankH = 2.1;
-    const tank = MeshBuilder.CreateCylinder(`tank-${building.id}`, { height: tankH, diameter: 1.6, tessellation: 8 }, scene);
+    const tank = MeshBuilder.CreateCylinder(`tank-${building.id}`, { height: tankH, diameter: 1.6, tessellation: 10 }, scene);
     tank.material = tankMat;
     tank.position.set(bx + shape.w * 0.22, topY + pH + tankH / 2, bz - shape.d * 0.22);
     tank.isPickable = false;
-    const legH = 0.8;
     ([[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]] as [number, number][]).forEach(([lx, lz], i) => {
-      const leg = MeshBuilder.CreateCylinder(`tleg-${building.id}-${i}`, { height: legH, diameter: 0.12, tessellation: 4 }, scene);
+      const leg = MeshBuilder.CreateCylinder(`tleg-${building.id}-${i}`, { height: 0.8, diameter: 0.12, tessellation: 4 }, scene);
       leg.material = tankMat;
-      leg.position.set(bx + shape.w * 0.22 + lx * 0.5, topY + pH + legH / 2 - 0.1, bz - shape.d * 0.22 + lz * 0.5);
+      leg.position.set(bx + shape.w * 0.22 + lx * 0.5, topY + pH + 0.3, bz - shape.d * 0.22 + lz * 0.5);
       leg.isPickable = false;
     });
   }
 
   if (building.type === 'room' && building.isLandmark) {
-    const dishMat = new StandardMaterial(`dish-mat-${building.id}`, scene);
-    dishMat.diffuseColor = accent.scale(0.28);
-    dishMat.emissiveColor = accent.scale(0.22);
-    dishMat.specularColor = Color3.Black();
+    const dishMat = new PBRMaterial(`dish-mat-${building.id}`, scene);
+    dishMat.albedoColor   = accent.scale(0.22);
+    dishMat.emissiveColor = accent.scale(0.28);
+    dishMat.metallic      = 0.82;
+    dishMat.roughness     = 0.22;
     const pole = MeshBuilder.CreateCylinder(`dpole-${building.id}`, { height: 2.5, diameter: 0.2, tessellation: 6 }, scene);
     pole.material = dishMat;
     pole.position.set(bx + shape.w * 0.2, topY + pH + 1.25, bz + shape.d * 0.2);
@@ -288,8 +487,6 @@ function addRooftopDetails(
   }
 }
 
-
-// ─── Horizontal glowing ledge bands around building ──────────────────────
 function addLedgeBands(
   scene: Scene,
   building: BuildingDef,
@@ -298,14 +495,15 @@ function addLedgeBands(
   accent: Color3
 ): void {
   if (shape.h < 10) return;
-  const overhang = 0.44;
-  const bandH    = 0.36;
+  const overhang = 0.50;
+  const bandH    = 0.32;
   const numBands = shape.h > 30 ? 3 : shape.h > 18 ? 2 : 1;
 
-  const mat = new StandardMaterial(`lb-mat-${building.id}`, scene);
-  mat.diffuseColor  = accent.scale(0.10);
-  mat.emissiveColor = accent.scale(0.24);
-  mat.specularColor = Color3.Black();
+  const mat = new PBRMaterial(`lb-mat-${building.id}`, scene);
+  mat.albedoColor   = accent.scale(0.08);
+  mat.emissiveColor = accent.scale(0.28);
+  mat.metallic      = 0.85;
+  mat.roughness     = 0.10;
 
   for (let i = 1; i <= numBands; i++) {
     const bandY = (shape.h * i) / (numBands + 1);
@@ -320,23 +518,23 @@ function addLedgeBands(
   }
 }
 
-// ─── AC unit clusters on rooftop ─────────────────────────────────────────
 function addACUnits(
   scene: Scene,
   building: BuildingDef,
   shape: { w: number; d: number; h: number },
   bx: number, bz: number
 ): void {
-  const topY  = shape.h + 0.65; // sit above parapet
-  const mat   = new StandardMaterial(`ac-mat-${building.id}`, scene);
-  mat.diffuseColor  = new Color3(0.16, 0.16, 0.20);
-  mat.specularColor = new Color3(0.28, 0.28, 0.32);
-  mat.emissiveColor = new Color3(0.014, 0.016, 0.024);
+  const topY  = shape.h + 0.65;
+  const mat   = new PBRMaterial(`ac-mat-${building.id}`, scene);
+  mat.albedoColor   = new Color3(0.12, 0.12, 0.16);
+  mat.metallic      = 0.72;
+  mat.roughness     = 0.42;
+  mat.emissiveColor = new Color3(0.01, 0.012, 0.018);
 
   const rng   = seeded(hashString(building.id + 'ac'));
   const count = 2 + Math.floor(rng() * 3);
-  const safeW = shape.w * 0.62;
-  const safeD = shape.d * 0.62;
+  const safeW = shape.w * 0.60;
+  const safeD = shape.d * 0.60;
 
   for (let i = 0; i < count; i++) {
     const ax = bx + (rng() - 0.5) * safeW;
@@ -351,7 +549,6 @@ function addACUnits(
   }
 }
 
-// ─── Lobby entrance protrusion at base ───────────────────────────────────
 function addBuildingLobby(
   scene: Scene,
   building: BuildingDef,
@@ -364,32 +561,32 @@ function addBuildingLobby(
   const lobD = 0.9;
   const lobZ = bz - shape.d / 2 - lobD / 2 + 0.05;
 
-  const lobMat = new StandardMaterial(`lob-mat-${building.id}`, scene);
-  lobMat.diffuseColor  = accent.scale(0.30);
-  lobMat.emissiveColor = accent.scale(0.14);
-  lobMat.specularColor = accent.scale(0.22);
+  const lobMat = new PBRMaterial(`lob-mat-${building.id}`, scene);
+  lobMat.albedoColor   = accent.scale(0.22);
+  lobMat.emissiveColor = accent.scale(0.16);
+  lobMat.metallic      = 0.75;
+  lobMat.roughness     = 0.20;
 
   const lob = MeshBuilder.CreateBox(`lob-${building.id}`, { width: lobW, depth: lobD, height: lobH }, scene);
   lob.material = lobMat;
   lob.position.set(bx, lobH / 2, lobZ);
   lob.isPickable = false;
 
-  // Flat canopy overhang
-  const cMat = new StandardMaterial(`can-mat-${building.id}`, scene);
-  cMat.diffuseColor  = accent.scale(0.09);
-  cMat.emissiveColor = accent.scale(0.05);
-  cMat.specularColor = Color3.Black();
-  const can = MeshBuilder.CreateBox(`can-${building.id}`, { width: lobW + 1.0, depth: lobD + 0.7, height: 0.18 }, scene);
+  const cMat = new PBRMaterial(`can-mat-${building.id}`, scene);
+  cMat.albedoColor   = accent.scale(0.08);
+  cMat.emissiveColor = accent.scale(0.06);
+  cMat.metallic      = 0.88;
+  cMat.roughness     = 0.12;
+  const can = MeshBuilder.CreateBox(`can-${building.id}`, { width: lobW + 1.2, depth: lobD + 0.8, height: 0.16 }, scene);
   can.material = cMat;
-  can.position.set(bx, lobH + 0.09, lobZ - 0.25);
+  can.position.set(bx, lobH + 0.08, lobZ - 0.25);
   can.isPickable = false;
 
-  // Glowing door slit
   const dH   = Math.min(lobH * 0.74, 2.6);
   const dW   = Math.min(lobW * 0.26, 1.3);
   const dMat = new StandardMaterial(`dor-mat-${building.id}`, scene);
   dMat.diffuseColor  = Color3.Black();
-  dMat.emissiveColor = accent.scale(0.85);
+  dMat.emissiveColor = accent.scale(0.95);
   dMat.specularColor = Color3.Black();
   const door = MeshBuilder.CreatePlane(`dor-${building.id}`, { width: dW, height: dH }, scene);
   door.material = dMat;
@@ -398,7 +595,6 @@ function addBuildingLobby(
   door.isPickable = false;
 }
 
-// ─── Neon name sign on landmark front face ────────────────────────────────
 function addBuildingSign(
   scene: Scene,
   building: BuildingDef,
@@ -409,7 +605,7 @@ function addBuildingSign(
   const sigH = 2.4;
   const sigW = Math.min(shape.w * 0.82, 13);
   const sigY = shape.h * 0.76;
-  const sigZ = bz - shape.d / 2 - 0.16;
+  const sigZ = bz - shape.d / 2 - 0.18;
 
   const ar = Math.round(accent.r * 255);
   const ag = Math.round(accent.g * 255);
@@ -418,28 +614,19 @@ function addBuildingSign(
   const tex = new DynamicTexture(`sig-tex-${building.id}`, { width: 512, height: 128 }, scene, false);
   const ctx = tex.getContext() as unknown as CanvasRenderingContext2D;
   ctx.clearRect(0, 0, 512, 128);
-
-  // Panel
-  ctx.fillStyle = 'rgba(4,4,10,0.82)';
+  ctx.fillStyle = 'rgba(3,3,8,0.88)';
   ctx.fillRect(0, 0, 512, 128);
-
-  // Outer neon border
-  ctx.strokeStyle = `rgba(${ar},${ag},${ab},0.92)`;
+  ctx.strokeStyle = `rgba(${ar},${ag},${ab},0.94)`;
   ctx.lineWidth = 5;
   ctx.strokeRect(5, 5, 502, 118);
-
-  // Inner accent line
-  ctx.strokeStyle = `rgba(${ar},${ag},${ab},0.35)`;
+  ctx.strokeStyle = `rgba(${ar},${ag},${ab},0.32)`;
   ctx.lineWidth = 2;
   ctx.strokeRect(11, 11, 490, 106);
-
-  // Building name
   ctx.font = 'bold 50px Arial';
   ctx.fillStyle = `rgb(${ar},${ag},${ab})`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(building.name.toUpperCase(), 256, 64);
-
   tex.update(false);
   tex.hasAlpha = true;
 
@@ -457,10 +644,9 @@ function addBuildingSign(
   plane.material = mat;
 }
 
-// ─── Pulsing activity beacon orb above live buildings ────────────────────────
 interface BeaconEntry {
   mesh: Mesh;
-  mat: StandardMaterial;
+  mat: PBRMaterial;
   base: Color3;
   bx: number; bz: number; baseY: number;
   phase: number; speed: number;
@@ -480,12 +666,13 @@ function addActivityBeacon(
     : building.type === 'club' ? accent
     :                            new Color3(0.14, 0.95, 0.54);
 
-  const mat = new StandardMaterial(`bcn-mat-${building.id}`, scene);
-  mat.diffuseColor  = Color3.Black();
-  mat.emissiveColor = beaconColor.scale(0.8);
-  mat.specularColor = Color3.Black();
+  const mat = new PBRMaterial(`bcn-mat-${building.id}`, scene);
+  mat.albedoColor   = Color3.Black();
+  mat.emissiveColor = beaconColor.scale(0.85);
+  mat.metallic      = 0.0;
+  mat.roughness     = 1.0;
 
-  const orb: Mesh = MeshBuilder.CreateSphere(`bcn-${building.id}`, { diameter: 0.62 }, scene);
+  const orb: Mesh = MeshBuilder.CreateSphere(`bcn-${building.id}`, { diameter: 0.65, segments: 8 }, scene);
   orb.material = mat;
   orb.position.set(bx, baseY, bz);
   orb.isPickable = false;
@@ -495,8 +682,7 @@ function addActivityBeacon(
   entries.push({ mesh: orb, mat, base: beaconColor, bx, bz, baseY, phase, speed });
 }
 
-// ─── Drone traffic orbiting the city ─────────────────────────────────────────
-function createDroneTraffic(scene: Scene): void {
+function createDroneTraffic(scene: Scene, profile: RenderProfile): void {
   const configs: Array<{ radius: number; speed: number; height: number; phase: number }> = [
     { radius: 122, speed:  0.18, height: 58, phase: 0.0 },
     { radius:  82, speed: -0.24, height: 44, phase: 1.2 },
@@ -505,20 +691,26 @@ function createDroneTraffic(scene: Scene): void {
     { radius: 105, speed: -0.11, height: 72, phase: 4.8 },
   ];
 
-  const drones = configs.map((cfg, i) => {
-    const bodyMat = new StandardMaterial(`drn-mat-${i}`, scene);
-    bodyMat.diffuseColor  = Color3.Black();
-    bodyMat.emissiveColor = new Color3(0.68, 0.74, 1.0);
-    bodyMat.specularColor = Color3.Black();
+  const droneConfigs = profile === 'lite' ? configs.slice(0, 3) : configs;
+
+  const drones = droneConfigs.map((cfg, i) => {
+    const bodyMat = new PBRMaterial(`drn-mat-${i}`, scene);
+    bodyMat.albedoColor   = new Color3(0.05, 0.06, 0.08);
+    bodyMat.emissiveColor = new Color3(0.55, 0.62, 1.0);
+    bodyMat.metallic      = 0.92;
+    bodyMat.roughness     = 0.12;
+
     const body: Mesh = MeshBuilder.CreateBox(`drn-body-${i}`, { width: 1.2, depth: 0.38, height: 0.18 }, scene);
     body.material = bodyMat;
     body.isPickable = false;
 
-    const lightMat = new StandardMaterial(`drn-lm-${i}`, scene);
-    lightMat.diffuseColor  = Color3.Black();
+    const lightMat = new PBRMaterial(`drn-lm-${i}`, scene);
+    lightMat.albedoColor   = Color3.Black();
     lightMat.emissiveColor = new Color3(1, 0.1, 0.1);
-    lightMat.specularColor = Color3.Black();
-    const orb: Mesh = MeshBuilder.CreateSphere(`drn-orb-${i}`, { diameter: 0.22 }, scene);
+    lightMat.metallic      = 0.0;
+    lightMat.roughness     = 1.0;
+
+    const orb: Mesh = MeshBuilder.CreateSphere(`drn-orb-${i}`, { diameter: 0.22, segments: 6 }, scene);
     orb.material = lightMat;
     orb.isPickable = false;
 
@@ -540,7 +732,6 @@ function createDroneTraffic(scene: Scene): void {
   });
 }
 
-// ─── Emissive ground glow disc under landmark ─────────────────────────────
 function addGroundGlow(
   scene: Scene,
   building: BuildingDef,
@@ -548,20 +739,19 @@ function addGroundGlow(
   bx: number, bz: number,
   accent: Color3
 ): void {
-  const diam = Math.max(shape.w, shape.d) * 1.85;
-  const disc = MeshBuilder.CreateCylinder(`gd-${building.id}`, { height: 0.04, diameter: diam, tessellation: 32 }, scene);
-  disc.position.set(bx, 0.05, bz);
+  const diam = Math.max(shape.w, shape.d) * 2.2;
+  const disc = MeshBuilder.CreateCylinder(`gd-${building.id}`, { height: 0.03, diameter: diam, tessellation: 40 }, scene);
+  disc.position.set(bx, 0.04, bz);
   disc.isPickable = false;
 
   const mat = new StandardMaterial(`gd-mat-${building.id}`, scene);
   mat.diffuseColor  = Color3.Black();
-  mat.emissiveColor = accent.scale(0.30);
+  mat.emissiveColor = accent.scale(0.35);
   mat.specularColor = Color3.Black();
-  mat.alpha = 0.58;
+  mat.alpha = 0.55;
   disc.material = mat;
 }
 
-// ─── Road corridors between districts ────────────────────────────────────
 function createRoads(scene: Scene): void {
   const { TILE_SIZE, TILE_GAP, GRID_COLS, GRID_ROWS } = CITY;
   const stride  = TILE_SIZE + TILE_GAP;
@@ -570,17 +760,17 @@ function createRoads(scene: Scene): void {
   const originX = -totalW / 2;
   const originZ = -totalH / 2;
 
-  const roadMat = new StandardMaterial('road-mat', scene);
-  roadMat.diffuseColor  = new Color3(0.04, 0.04, 0.06);
-  roadMat.emissiveColor = new Color3(0.008, 0.008, 0.012);
-  roadMat.specularColor = Color3.Black();
+  const roadMat = new PBRMaterial('road-mat', scene);
+  roadMat.albedoColor   = new Color3(0.025, 0.025, 0.035);
+  roadMat.metallic      = 0.80;
+  roadMat.roughness     = 0.18;
+  roadMat.emissiveColor = new Color3(0.006, 0.006, 0.010);
 
   const dashMat = new StandardMaterial('road-dash', scene);
   dashMat.diffuseColor  = Color3.Black();
-  dashMat.emissiveColor = new Color3(0.36, 0.32, 0.12);
+  dashMat.emissiveColor = new Color3(0.38, 0.34, 0.14);
   dashMat.specularColor = Color3.Black();
 
-  // Vertical corridors (between district columns)
   for (let col = 0; col < GRID_COLS - 1; col++) {
     const rx = originX + (col + 1) * stride - TILE_GAP / 2;
     const road = MeshBuilder.CreateGround(`vrd-${col}`, { width: TILE_GAP, height: totalH }, scene);
@@ -596,7 +786,6 @@ function createRoads(scene: Scene): void {
     }
   }
 
-  // Horizontal corridors (between district rows)
   for (let row = 0; row < GRID_ROWS - 1; row++) {
     const rz = originZ + (row + 1) * stride - TILE_GAP / 2;
     const road = MeshBuilder.CreateGround(`hrd-${row}`, { width: totalW, height: TILE_GAP }, scene);
@@ -613,8 +802,59 @@ function createRoads(scene: Scene): void {
   }
 }
 
-// ─── Street lamp posts along road corridors ───────────────────────────────
-function createStreetLamps(scene: Scene): void {
+function createCityRingRoad(scene: Scene): void {
+  const roadMat = new PBRMaterial('city-ring-road', scene);
+  roadMat.albedoColor = new Color3(0.018, 0.018, 0.026);
+  roadMat.metallic = 0.86;
+  roadMat.roughness = 0.13;
+  roadMat.emissiveColor = new Color3(0.006, 0.006, 0.012);
+
+  const laneMat = new StandardMaterial('city-ring-lane', scene);
+  laneMat.diffuseColor = Color3.Black();
+  laneMat.emissiveColor = new Color3(0.58, 0.47, 0.16);
+  laneMat.specularColor = Color3.Black();
+
+  const radius = 86;
+  const roadWidth = 9;
+  const segments = 72;
+  const segmentLength = (Math.PI * 2 * radius) / segments + 0.4;
+
+  for (let i = 0; i < segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    const x = Math.cos(angle) * radius;
+    const z = Math.sin(angle) * radius;
+    const road = MeshBuilder.CreateBox(`ring-road-${i}`, { width: segmentLength, depth: roadWidth, height: 0.08 }, scene);
+    road.material = roadMat;
+    road.position.set(x, 0.035, z);
+    road.rotation.y = -angle + Math.PI / 2;
+    road.isPickable = false;
+    road.checkCollisions = true;
+
+    if (i % 2 === 0) {
+      const dash = MeshBuilder.CreateBox(`ring-road-dash-${i}`, { width: segmentLength * 0.42, depth: 0.16, height: 0.09 }, scene);
+      dash.material = laneMat;
+      dash.position.set(x, 0.11, z);
+      dash.rotation.y = -angle + Math.PI / 2;
+      dash.isPickable = false;
+    }
+  }
+
+  DISTRICTS.forEach((district) => {
+    const center = districtCenter(district);
+    const spokeLength = Math.max(18, Math.sqrt(center.x * center.x + center.z * center.z) - CITY.TILE_SIZE * 0.42);
+    const angle = Math.atan2(center.z, center.x);
+    const x = Math.cos(angle) * (spokeLength / 2);
+    const z = Math.sin(angle) * (spokeLength / 2);
+    const spoke = MeshBuilder.CreateBox(`spoke-road-${district.id}`, { width: spokeLength, depth: 6, height: 0.07 }, scene);
+    spoke.material = roadMat;
+    spoke.position.set(x, 0.032, z);
+    spoke.rotation.y = -angle;
+    spoke.isPickable = false;
+    spoke.checkCollisions = true;
+  });
+}
+
+function createStreetLamps(scene: Scene, profile: RenderProfile): void {
   const { TILE_SIZE, TILE_GAP, GRID_COLS, GRID_ROWS } = CITY;
   const stride  = TILE_SIZE + TILE_GAP;
   const totalW  = GRID_COLS * TILE_SIZE + (GRID_COLS - 1) * TILE_GAP;
@@ -622,13 +862,14 @@ function createStreetLamps(scene: Scene): void {
   const originX = -totalW / 2;
   const originZ = -totalH / 2;
 
-  const poleMat = new StandardMaterial('sl-pole', scene);
-  poleMat.diffuseColor  = new Color3(0.10, 0.10, 0.13);
-  poleMat.specularColor = new Color3(0.22, 0.22, 0.26);
+  const poleMat = new PBRMaterial('sl-pole', scene);
+  poleMat.albedoColor = new Color3(0.08, 0.08, 0.11);
+  poleMat.metallic    = 0.88;
+  poleMat.roughness   = 0.30;
 
   const bulbMat = new StandardMaterial('sl-bulb', scene);
   bulbMat.diffuseColor  = Color3.White();
-  bulbMat.emissiveColor = new Color3(1.0, 0.91, 0.72);
+  bulbMat.emissiveColor = new Color3(1.0, 0.92, 0.74);
   bulbMat.specularColor = Color3.Black();
 
   let lpIdx = 0;
@@ -647,15 +888,14 @@ function createStreetLamps(scene: Scene): void {
     arm.position.set(x + dir * 0.7, H - 0.22, z);
     arm.isPickable = false;
 
-    const bulb = MeshBuilder.CreateSphere(`slb-${idx}`, { diameter: 0.46 }, scene);
+    const bulb = MeshBuilder.CreateSphere(`slb-${idx}`, { diameter: 0.46, segments: 6 }, scene);
     bulb.material = bulbMat;
     bulb.position.set(x + dir * 1.4, H - 0.10, z);
     bulb.isPickable = false;
   };
 
-  const SPACING = 16;
+  const SPACING = profile === 'lite' ? 24 : 16;
 
-  // Along vertical road corridors
   for (let col = 0; col < GRID_COLS - 1; col++) {
     const rx = originX + (col + 1) * stride - TILE_GAP / 2;
     const steps = Math.floor(totalH / SPACING);
@@ -666,7 +906,6 @@ function createStreetLamps(scene: Scene): void {
     }
   }
 
-  // Along horizontal road corridors
   for (let row = 0; row < GRID_ROWS - 1; row++) {
     const rz = originZ + (row + 1) * stride - TILE_GAP / 2;
     const steps = Math.floor(totalW / SPACING);
@@ -678,30 +917,30 @@ function createStreetLamps(scene: Scene): void {
   }
 }
 
-// ─── Starfield ────────────────────────────────────────────────────────────
-function createStarfield(scene: Scene): void {
+function createStarfield(scene: Scene, profile: RenderProfile): void {
   const tex = new DynamicTexture('star_tex', { width: 16, height: 16 }, scene, false);
   const ctx = tex.getContext() as unknown as CanvasRenderingContext2D;
   ctx.clearRect(0, 0, 16, 16);
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
   ctx.beginPath();
   ctx.arc(8, 8, 5, 0, Math.PI * 2);
   ctx.fill();
   tex.update(false);
 
-  const stars = new ParticleSystem('stars', 1200, scene);
+  const capacity = profile === 'lite' ? 500 : 1400;
+  const stars = new ParticleSystem('stars', capacity, scene);
   stars.particleTexture = tex;
   stars.emitter = new Vector3(0, 0, 0);
-  stars.minEmitBox = new Vector3(-380, 170, -380);
-  stars.maxEmitBox = new Vector3(380, 260, 380);
+  stars.minEmitBox = new Vector3(-380, 175, -380);
+  stars.maxEmitBox = new Vector3(380, 265, 380);
   stars.color1 = new Color4(1, 1, 1, 1);
-  stars.color2 = new Color4(0.75, 0.83, 1, 0.75);
+  stars.color2 = new Color4(0.72, 0.80, 1, 0.72);
   stars.colorDead = new Color4(0, 0, 0, 0);
-  stars.minSize = 0.3;
-  stars.maxSize = 0.9;
+  stars.minSize = 0.28;
+  stars.maxSize = 0.85;
   stars.minLifeTime = 99999;
   stars.maxLifeTime = 99999;
-  stars.emitRate = 1200;
+  stars.emitRate = capacity;
   stars.minEmitPower = 0;
   stars.maxEmitPower = 0;
   stars.updateSpeed = 0;
@@ -709,7 +948,6 @@ function createStarfield(scene: Scene): void {
   stars.start();
 }
 
-// ─── Floating district label billboard ───────────────────────────────────
 function createDistrictLabel(scene: Scene, district: District): void {
   const { x, z } = districtCenter(district);
   let maxH = 0;
@@ -720,7 +958,7 @@ function createDistrictLabel(scene: Scene, district: District): void {
 
   const plane = MeshBuilder.CreatePlane(`dlabel-${district.id}`, { width: 20, height: 4.5 }, scene);
   plane.position.set(x, maxH + 14, z);
-  plane.billboardMode = 7; // BILLBOARDMODE_ALL
+  plane.billboardMode = 7;
   plane.isPickable = false;
 
   const tex = new DynamicTexture(`dlabeltex-${district.id}`, { width: 512, height: 128 }, scene, false);
@@ -728,8 +966,8 @@ function createDistrictLabel(scene: Scene, district: District): void {
   ctx.clearRect(0, 0, 512, 128);
   const grad = ctx.createLinearGradient(0, 0, 512, 0);
   grad.addColorStop(0,    'rgba(0,0,0,0)');
-  grad.addColorStop(0.12, 'rgba(0,0,0,0.38)');
-  grad.addColorStop(0.88, 'rgba(0,0,0,0.38)');
+  grad.addColorStop(0.12, 'rgba(0,0,0,0.42)');
+  grad.addColorStop(0.88, 'rgba(0,0,0,0.42)');
   grad.addColorStop(1,    'rgba(0,0,0,0)');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 512, 128);
@@ -750,170 +988,372 @@ function createDistrictLabel(scene: Scene, district: District): void {
   plane.material = mat;
 }
 
-function animateCamera(
-  camera: ArcRotateCamera,
-  scene: Scene,
-  to: { alpha?: number; beta?: number; radius?: number; targetX?: number; targetZ?: number },
-  ms = 900
-) {
-  const fps = 60;
-  const frames = Math.round((ms * fps) / 1000);
-  const ease = new CubicEase();
-  ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT);
-
-  const makeFloat = (name: string, prop: string, from: number, toVal: number) => {
-    const a = new Animation(name, prop, fps, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CONSTANT);
-    a.setKeys([{ frame: 0, value: from }, { frame: frames, value: toVal }]);
-    a.setEasingFunction(ease);
-    return a;
-  };
-
-  const anims: Animation[] = [];
-  if (to.radius !== undefined) anims.push(makeFloat('r', 'radius', camera.radius, to.radius));
-  if (to.beta !== undefined)   anims.push(makeFloat('b', 'beta',   camera.beta,   to.beta));
-  if (to.alpha !== undefined)  anims.push(makeFloat('a', 'alpha',  camera.alpha,  to.alpha));
-
-  scene.beginDirectAnimation(camera, anims, 0, frames, false);
-
-  if (to.targetX !== undefined || to.targetZ !== undefined) {
-    const startX = camera.target.x;
-    const startZ = camera.target.z;
-    const endX = to.targetX ?? startX;
-    const endZ = to.targetZ ?? startZ;
-    let frame = 0;
-    const obs = scene.onBeforeRenderObservable.add(() => {
-      frame++;
-      const t = Math.min(frame / frames, 1);
-      const e = ease.ease(t);
-      camera.target.x = startX + (endX - startX) * e;
-      camera.target.z = startZ + (endZ - startZ) * e;
-      if (frame >= frames) scene.onBeforeRenderObservable.remove(obs);
-    });
-  }
+// ─── Street cars ──────────────────────────────────────────────────────────────
+interface CarEntry {
+  body: Mesh;
+  hlL: Mesh; hlR: Mesh;
+  tlL: Mesh; tlR: Mesh;
+  hlMat: PBRMaterial; tlMat: PBRMaterial;
+  startPos: Vector3; endPos: Vector3;
+  speed: number; t: number;
 }
 
-export default function City3D({ navigationState, onNavigate, onReady }: City3DProps) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const engineRef = useRef<Engine | null>(null);
-  const cameraRef = useRef<ArcRotateCamera | null>(null);
-  const sceneRef  = useRef<Scene | null>(null);
-  const buildingPositions = useRef<Record<string, { x: number; z: number }>>({});
-  const pointerDownRef = useRef<{ x: number; y: number; time: number } | null>(null);
+function createStreetCars(scene: Scene, profile: RenderProfile): CarEntry[] {
+  const { TILE_SIZE, TILE_GAP, GRID_COLS, GRID_ROWS } = CITY;
+  const stride  = TILE_SIZE + TILE_GAP;
+  const totalW  = GRID_COLS * TILE_SIZE + (GRID_COLS - 1) * TILE_GAP;
+  const totalH  = GRID_ROWS * TILE_SIZE + (GRID_ROWS - 1) * TILE_GAP;
+  const originX = -totalW / 2;
+  const originZ = -totalH / 2;
 
-  // Keep callback in ref so scene setup effect never needs to re-run
-  const onNavigateRef = useRef(onNavigate);
-  useEffect(() => { onNavigateRef.current = onNavigate; }, [onNavigate]);
+  const bodyColors = [
+    new Color3(0.04, 0.04, 0.06),
+    new Color3(0.06, 0.02, 0.02),
+    new Color3(0.02, 0.05, 0.08),
+    new Color3(0.08, 0.08, 0.10),
+    new Color3(0.02, 0.04, 0.04),
+  ];
 
-  const navigationStateRef = useRef(navigationState);
-  useEffect(() => { navigationStateRef.current = navigationState; }, [navigationState]);
+  const corridors: Array<{ start: Vector3; end: Vector3; lane: number }> = [];
+
+  for (let col = 0; col < GRID_COLS - 1; col++) {
+    const rx = originX + (col + 1) * stride - TILE_GAP / 2;
+    corridors.push({
+      start: new Vector3(rx - 1.0, 0.55, originZ - 10),
+      end:   new Vector3(rx - 1.0, 0.55, originZ + totalH + 10),
+      lane: col,
+    });
+    corridors.push({
+      start: new Vector3(rx + 1.0, 0.55, originZ + totalH + 10),
+      end:   new Vector3(rx + 1.0, 0.55, originZ - 10),
+      lane: col,
+    });
+  }
+
+  for (let row = 0; row < GRID_ROWS - 1; row++) {
+    const rz = originZ + (row + 1) * stride - TILE_GAP / 2;
+    corridors.push({
+      start: new Vector3(originX - 10,          0.55, rz - 1.0),
+      end:   new Vector3(originX + totalW + 10, 0.55, rz - 1.0),
+      lane: row,
+    });
+    corridors.push({
+      start: new Vector3(originX + totalW + 10, 0.55, rz + 1.0),
+      end:   new Vector3(originX - 10,          0.55, rz + 1.0),
+      lane: row,
+    });
+  }
+
+  const carCount = profile === 'lite' ? Math.min(corridors.length, 4) : corridors.length;
+  const entries: CarEntry[] = [];
+
+  for (let i = 0; i < carCount; i++) {
+    const corridor = corridors[i % corridors.length];
+    const colorIdx = (i + corridor.lane) % bodyColors.length;
+
+    const bodyMat = new PBRMaterial(`car-body-mat-${i}`, scene);
+    bodyMat.albedoColor = bodyColors[colorIdx];
+    bodyMat.metallic    = 0.72;
+    bodyMat.roughness   = 0.30;
+
+    const body = MeshBuilder.CreateBox(`car-${i}`, { width: 1.8, depth: 4.2, height: 1.3 }, scene);
+    body.material = bodyMat;
+    body.isPickable = false;
+    body.checkCollisions = false;
+
+    // roof setback
+    const roofMat = new PBRMaterial(`car-roof-${i}`, scene);
+    roofMat.albedoColor = bodyColors[colorIdx].scale(0.8);
+    roofMat.metallic    = 0.65;
+    roofMat.roughness   = 0.32;
+    const roof = MeshBuilder.CreateBox(`car-roof-${i}`, { width: 1.4, depth: 2.2, height: 0.65 }, scene);
+    roof.material = roofMat;
+    roof.isPickable = false;
+    roof.parent = body;
+    roof.position.set(0, 0.975, -0.2);
+
+    const hlMat = new PBRMaterial(`car-hl-${i}`, scene);
+    hlMat.albedoColor   = Color3.Black();
+    hlMat.emissiveColor = new Color3(1.0, 0.96, 0.82);
+    hlMat.metallic = 0; hlMat.roughness = 1;
+
+    const tlMat = new PBRMaterial(`car-tl-${i}`, scene);
+    tlMat.albedoColor   = Color3.Black();
+    tlMat.emissiveColor = new Color3(0.9, 0.06, 0.06);
+    tlMat.metallic = 0; tlMat.roughness = 1;
+
+    const mkLight = (name: string, mat: PBRMaterial, ox: number, oz: number) => {
+      const s = MeshBuilder.CreateSphere(name, { diameter: 0.28, segments: 5 }, scene);
+      s.material = mat;
+      s.isPickable = false;
+      s.parent = body;
+      s.position.set(ox, 0.0, oz);
+      return s;
+    };
+
+    const hlL = mkLight(`car-hll-${i}`, hlMat, -0.65, -2.1);
+    const hlR = mkLight(`car-hlr-${i}`, hlMat,  0.65, -2.1);
+    const tlL = mkLight(`car-tll-${i}`, tlMat, -0.65,  2.1);
+    const tlR = mkLight(`car-tlr-${i}`, tlMat,  0.65,  2.1);
+
+    const tOffset = (i / carCount);
+    entries.push({
+      body, hlL, hlR, tlL, tlR, hlMat, tlMat,
+      startPos: corridor.start.clone(),
+      endPos:   corridor.end.clone(),
+      speed: 6 + (i % 3) * 2.5,
+      t: tOffset,
+    });
+  }
+
+  return entries;
+}
+
+// ─── Pedestrians ──────────────────────────────────────────────────────────────
+interface PedEntry {
+  body: Mesh; head: Mesh;
+  startPos: Vector3; endPos: Vector3;
+  speed: number; t: number; pauseT: number;
+  cx: number; cz: number; radius: number;
+  rng: () => number;
+}
+
+function createPedestrians(scene: Scene, profile: RenderProfile): PedEntry[] {
+  const pedColors = [
+    new Color3(0.08, 0.06, 0.10),
+    new Color3(0.06, 0.08, 0.10),
+    new Color3(0.10, 0.06, 0.06),
+    new Color3(0.04, 0.08, 0.06),
+  ];
+
+  const entries: PedEntry[] = [];
+  const count = profile === 'lite' ? 6 : 14;
+
+  for (let i = 0; i < count; i++) {
+    const district = DISTRICTS[i % DISTRICTS.length];
+    const { x: cx, z: cz } = districtCenter(district);
+    const rng = seeded(hashString('ped' + i));
+
+    const colorIdx = i % pedColors.length;
+    const bodyMat = new PBRMaterial(`ped-body-${i}`, scene);
+    bodyMat.albedoColor = pedColors[colorIdx];
+    bodyMat.metallic    = 0.05;
+    bodyMat.roughness   = 0.90;
+
+    const skinColors = [
+      new Color3(0.32, 0.22, 0.16),
+      new Color3(0.45, 0.32, 0.22),
+      new Color3(0.18, 0.12, 0.08),
+      new Color3(0.60, 0.44, 0.30),
+    ];
+    const headMat = new PBRMaterial(`ped-head-${i}`, scene);
+    headMat.albedoColor = skinColors[i % skinColors.length];
+    headMat.metallic    = 0.0;
+    headMat.roughness   = 0.95;
+
+    const body = MeshBuilder.CreateCylinder(`ped-body-${i}`, { height: 1.7, diameter: 0.4, tessellation: 7 }, scene);
+    body.material = bodyMat;
+    body.isPickable = false;
+    body.checkCollisions = false;
+
+    const head = MeshBuilder.CreateSphere(`ped-head-${i}`, { diameter: 0.42, segments: 6 }, scene);
+    head.material = headMat;
+    head.isPickable = false;
+    head.parent = body;
+    head.position.set(0, 1.06, 0);
+
+    const radius = 8 + rng() * 12;
+    const angle0 = rng() * Math.PI * 2;
+    const angle1 = angle0 + Math.PI * (0.4 + rng() * 0.8);
+    const startPos = new Vector3(cx + Math.cos(angle0) * radius, 0.85, cz + Math.sin(angle0) * radius);
+    const endPos   = new Vector3(cx + Math.cos(angle1) * radius, 0.85, cz + Math.sin(angle1) * radius);
+
+    entries.push({
+      body, head,
+      startPos, endPos,
+      speed: 1.0 + rng() * 0.5,
+      t: rng(),
+      pauseT: 0,
+      cx, cz, radius,
+      rng,
+    });
+  }
+
+  return entries;
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+export default function City3D({ onProximityBuilding, onReady }: City3DProps) {
+  const canvasRef    = useRef<HTMLCanvasElement | null>(null);
+  const engineRef    = useRef<Engine | null>(null);
+  const sceneRef     = useRef<Scene | null>(null);
+
+  const onProximityRef = useRef(onProximityBuilding);
+  useEffect(() => { onProximityRef.current = onProximityBuilding; }, [onProximityBuilding]);
 
   const onReadyRef = useRef(onReady);
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
-  // ── Scene setup (runs once) ──────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    const renderProfile = getRenderProfile();
+    const isLiteMode    = renderProfile === 'lite';
     const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
+    engine.setHardwareScalingLevel(isLiteMode ? Math.min(2, Math.max(1.35, window.devicePixelRatio || 1)) : 1);
     engineRef.current = engine;
 
     const scene = new Scene(engine);
-    sceneRef.current = scene;
-    scene.clearColor = new Color4(0.03, 0.03, 0.07, 1);
+    sceneRef.current  = scene;
+    scene.clearColor  = new Color4(0.01, 0.01, 0.03, 1);
 
-    const camera = new ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 3.2, 260, Vector3.Zero(), scene);
+    // ── Collision world ───────────────────────────────────────────────────────
+    scene.collisionsEnabled = true;
+    scene.gravity           = new Vector3(0, -9.81, 0);
+
+    // ── Player capsule ────────────────────────────────────────────────────────
+    const player = MeshBuilder.CreateCapsule('player', { height: 1.8, radius: 0.38 }, scene);
+    player.position        = new Vector3(0, 0.9, -10);
+    player.isPickable      = false;
+    player.checkCollisions = true;
+    player.ellipsoid       = new Vector3(0.38, 0.9, 0.38);
+    player.isVisible       = false;
+
+    // ── Camera (GTA follow cam locked to player) ──────────────────────────────
+    const camera = new ArcRotateCamera('cam', -Math.PI / 2, Math.PI / 3.5, 14, player.position.clone(), scene);
     camera.attachControl(canvas, true);
-    camera.lowerRadiusLimit = 20;
-    camera.upperRadiusLimit = 420;
-    camera.lowerBetaLimit = 0.1;
-    camera.upperBetaLimit = Math.PI / 2.05;
-    camera.wheelPrecision = 2;
-    camera.panningSensibility = 60;
-    cameraRef.current = camera;
+    camera.lowerRadiusLimit    = 4;
+    camera.upperRadiusLimit    = 28;
+    camera.lowerBetaLimit      = 0.15;
+    camera.upperBetaLimit      = Math.PI / 2.2;
+    camera.panningSensibility  = 0; // disable panning — camera locked to player
+    camera.wheelPrecision      = 8;
 
+    // ── Lighting ──────────────────────────────────────────────────────────────
     const hemi = new HemisphericLight('hemi', new Vector3(0, 1, 0), scene);
-    hemi.intensity = 0.5;
-    hemi.diffuse = new Color3(0.88, 0.9, 1);
-    hemi.groundColor = new Color3(0.08, 0.04, 0.18);
+    hemi.intensity   = 0.10;
+    hemi.diffuse     = new Color3(0.22, 0.26, 0.45);
+    hemi.groundColor = new Color3(0.04, 0.02, 0.10);
 
-    const sun = new DirectionalLight('sun', new Vector3(-0.5, -1, -0.3), scene);
-    sun.intensity = 0.9;
-    sun.diffuse = new Color3(1, 0.95, 0.85);
+    const moon = new DirectionalLight('moon', new Vector3(-0.4, -1, -0.55), scene);
+    moon.intensity = 0.28;
+    moon.diffuse   = new Color3(0.65, 0.72, 1.0);
 
-    // ── Atmospheric fog ────────────────────────────────────────
+    const warmBounce = new DirectionalLight('warm', new Vector3(0.5, 0.2, 0.8), scene);
+    warmBounce.intensity = 0.06;
+    warmBounce.diffuse   = new Color3(1.0, 0.55, 0.22);
+
+    // ── Fog ───────────────────────────────────────────────────────────────────
     scene.fogMode    = Scene.FOGMODE_EXP2;
-    scene.fogDensity = 0.007;
-    scene.fogColor   = new Color3(0.03, 0.03, 0.07);
+    scene.fogDensity = 0.006;
+    scene.fogColor   = new Color3(0.04, 0.02, 0.10);
 
-    // ── Shadow generator (landmark buildings only for perf) ────────────
-    const shadowGen = new ShadowGenerator(512, sun);
+    // ── Shadows ───────────────────────────────────────────────────────────────
+    const shadowGen = new ShadowGenerator(isLiteMode ? 512 : 1024, moon);
     shadowGen.useBlurExponentialShadowMap = true;
-    shadowGen.blurKernel = 16;
+    shadowGen.blurKernel = isLiteMode ? 10 : 20;
+    shadowGen.darkness   = 0.55;
 
+    // ── Glow ──────────────────────────────────────────────────────────────────
     const glow = new GlowLayer('glow', scene);
-    glow.intensity = 0.7;
+    glow.intensity = isLiteMode ? 0.55 : 0.90;
 
-    // ── Post-processing pipeline ────────────────────────────────────────
+    // ── Post-processing ───────────────────────────────────────────────────────
     const pipeline = new DefaultRenderingPipeline('pipeline', true, scene, [camera]);
-    pipeline.bloomEnabled = true;
-    pipeline.bloomThreshold = 0.22;
-    pipeline.bloomWeight = 0.55;
-    pipeline.bloomKernel = 64;
-    pipeline.bloomScale = 0.5;
-    pipeline.chromaticAberrationEnabled = true;
-    pipeline.chromaticAberration.aberrationAmount = 12;
-    pipeline.grainEnabled = true;
-    pipeline.grain.intensity = 6;
-    pipeline.grain.animated = true;
 
-    // Ground plane
-    const ocean = MeshBuilder.CreateGround('ocean', { width: 700, height: 700 }, scene);
-    const oceanMat = new StandardMaterial('oceanMat', scene);
-    oceanMat.diffuseColor = new Color3(0.03, 0.03, 0.05);
-    oceanMat.specularColor = Color3.Black();
-    ocean.material = oceanMat;
-    ocean.position.y = -0.2;
-    ocean.receiveShadows = true;
+    pipeline.bloomEnabled   = true;
+    pipeline.bloomThreshold = isLiteMode ? 0.28 : 0.18;
+    pipeline.bloomWeight    = isLiteMode ? 0.50 : 0.82;
+    pipeline.bloomKernel    = isLiteMode ? 32   : 64;
+    pipeline.bloomScale     = 0.5;
 
-    // ── Build districts ──────────────────────────────────────────────────
-    const landmarkMats: Array<{ mat: StandardMaterial; base: Color3 }> = [];
-    const flickerMats:  Array<{ mat: StandardMaterial; base: Color3; seed: number }> = [];
+    pipeline.chromaticAberrationEnabled = !isLiteMode;
+    pipeline.chromaticAberration.aberrationAmount = 6;
+
+    pipeline.grainEnabled    = !isLiteMode;
+    pipeline.grain.intensity = 9;
+    pipeline.grain.animated  = true;
+
+    pipeline.imageProcessingEnabled = true;
+    pipeline.imageProcessing.toneMappingEnabled = true;
+    pipeline.imageProcessing.toneMappingType    = ImageProcessingConfiguration.TONEMAPPING_ACES;
+    pipeline.imageProcessing.exposure           = 1.28;
+    pipeline.imageProcessing.contrast           = 1.14;
+
+    pipeline.depthOfFieldEnabled = false; // DOF off in street-level cam
+
+    if (!isLiteMode) {
+      try {
+        const ssao = new SSAO2RenderingPipeline('ssao', scene, { ssaoRatio: 0.5, blurRatio: 1 }, [camera]);
+        ssao.radius        = 2.8;
+        ssao.totalStrength = 1.2;
+        ssao.samples       = 12;
+        ssao.maxZ          = 80;
+        ssao.expensiveBlur = true;
+      } catch { /* SSAO not supported */ }
+    }
+
+    // ── IBL probe ─────────────────────────────────────────────────────────────
+    const probe = new ReflectionProbe('probe', isLiteMode ? 64 : 128, scene);
+    probe.position = new Vector3(0, 60, 0);
+    scene.environmentTexture   = probe.cubeTexture;
+    scene.environmentIntensity = isLiteMode ? 0.35 : 0.55;
+
+    // ── Sky + environment ─────────────────────────────────────────────────────
+    createSkyDome(scene);
+    createHorizonGlow(scene);
+
+    // ── Ground ────────────────────────────────────────────────────────────────
+    const ground = MeshBuilder.CreateGround('ground', { width: 700, height: 700 }, scene);
+    const groundMat = new PBRMaterial('groundMat', scene);
+    groundMat.albedoColor   = new Color3(0.014, 0.014, 0.020);
+    groundMat.metallic      = 0.85;
+    groundMat.roughness     = 0.16;
+    groundMat.emissiveColor = new Color3(0.006, 0.006, 0.010);
+    ground.material   = groundMat;
+    ground.position.y = -0.2;
+    ground.receiveShadows = true;
+    ground.checkCollisions = true;
+
+    // ── Build districts ───────────────────────────────────────────────────────
+    const landmarkMats: Array<{ mat: PBRMaterial; base: Color3 }> = [];
+    const flickerMats:  Array<{ mat: PBRMaterial; base: Color3; seed: number }> = [];
     const beaconEntries: BeaconEntry[] = [];
+
+    // Store building proximity data: { id → { x, z, d (depth), meta } }
+    const proximityTargets: Array<{ x: number; z: number; d: number; meta: BuildingMeta }> = [];
 
     DISTRICTS.forEach((district) => {
       const { x, z } = districtCenter(district);
       const accent = Color3.FromHexString(district.color);
 
-      // Ground plate — clickable to enter district
-      const plate = MeshBuilder.CreateGround(`plate-${district.id}`, { width: CITY.TILE_SIZE, height: CITY.TILE_SIZE }, scene);
-      const plateMat = new StandardMaterial(`plateMat-${district.id}`, scene);
-      plateMat.diffuseColor = accent.scale(0.16);
-      plateMat.specularColor = Color3.Black();
-      plateMat.emissiveColor = accent.scale(0.04);
-      plate.material = plateMat;
-      plate.position.set(x, 0, z);
-      plate.isPickable = true;
+      if (!isLiteMode) {
+        const accentLight = new PointLight(`pl-${district.id}`, new Vector3(x, 28, z), scene);
+        accentLight.diffuse   = accent;
+        accentLight.specular  = accent.scale(0.55);
+        accentLight.intensity = 1.4;
+        accentLight.range     = (CITY.TILE_SIZE / 2) * 1.8;
+      }
 
-      plate.actionManager = new ActionManager(scene);
-      plate.actionManager.registerAction(
-        new ExecuteCodeAction(ActionManager.OnPointerOverTrigger, () => {
-          plateMat.emissiveColor = accent.scale(0.1);
-          canvas.style.cursor = 'pointer';
-        })
-      );
-      plate.actionManager.registerAction(
-        new ExecuteCodeAction(ActionManager.OnPointerOutTrigger, () => {
-          plateMat.emissiveColor = accent.scale(0.04);
-          canvas.style.cursor = 'grab';
-        })
-      );
+      const plate = MeshBuilder.CreateGround(`plate-${district.id}`, { width: CITY.TILE_SIZE, height: CITY.TILE_SIZE }, scene);
+      const plateMat = new PBRMaterial(`plateMat-${district.id}`, scene);
+      plateMat.albedoColor   = accent.scale(0.08);
+      plateMat.metallic      = 0.78;
+      plateMat.roughness     = 0.20;
+      plateMat.emissiveColor = accent.scale(0.05);
+      plate.material    = plateMat;
+      plate.position.set(x, 0, z);
+      plate.isPickable  = false;
+      plate.receiveShadows = true;
+      plate.checkCollisions = true;
 
       // Neon perimeter strips
-      const stripMat = new StandardMaterial(`stripMat-${district.id}`, scene);
-      stripMat.diffuseColor = accent;
-      stripMat.emissiveColor = accent;
-      stripMat.specularColor = Color3.Black();
+      const stripMat = new PBRMaterial(`stripMat-${district.id}`, scene);
+      stripMat.albedoColor   = accent.scale(0.3);
+      stripMat.emissiveColor = accent.scale(0.5);
+      stripMat.metallic      = 0.9;
+      stripMat.roughness     = 0.08;
 
       const half = CITY.TILE_SIZE / 2;
       const t = 0.5;
@@ -923,38 +1363,33 @@ export default function City3D({ navigationState, onNavigate, onReady }: City3DP
         [x - half, z,        t, CITY.TILE_SIZE],
         [x + half, z,        t, CITY.TILE_SIZE],
       ] as [number, number, number, number][]).forEach((s, i) => {
-        const strip = MeshBuilder.CreateBox(`strip-${district.id}-${i}`, { width: s[2], depth: s[3], height: 0.25 }, scene);
+        const strip = MeshBuilder.CreateBox(`strip-${district.id}-${i}`, { width: s[2], depth: s[3], height: 0.22 }, scene);
         strip.material = stripMat;
-        strip.position.set(s[0], 0.15, s[1]);
+        strip.position.set(s[0], 0.14, s[1]);
         strip.isPickable = false;
       });
 
-      // ── Buildings ──────────────────────────────────────────────────────
-      const rng = seeded(hashString(district.id));
-      const padding = 7;
+      // ── Buildings ──────────────────────────────────────────────────────────
+      const rng      = seeded(hashString(district.id));
+      const padding  = 7;
       const innerSize = CITY.TILE_SIZE - padding * 2;
-      const count = district.buildings.length;
-      const perSide = Math.ceil(Math.sqrt(count));
-      const cell = innerSize / perSide;
+      const count    = district.buildings.length;
+      const perSide  = Math.ceil(Math.sqrt(count));
+      const cell     = innerSize / perSide;
 
       district.buildings.forEach((building, idx) => {
         const row = Math.floor(idx / perSide);
         const col = idx % perSide;
-        const jx = (rng() - 0.5) * 1.2;
-        const jz = (rng() - 0.5) * 1.2;
-        const bx = x - innerSize / 2 + col * cell + cell / 2 + jx;
-        const bz = z - innerSize / 2 + row * cell + cell / 2 + jz;
+        const jx  = (rng() - 0.5) * 1.2;
+        const jz  = (rng() - 0.5) * 1.2;
+        const bx  = x - innerSize / 2 + col * cell + cell / 2 + jx;
+        const bz  = z - innerSize / 2 + row * cell + cell / 2 + jz;
 
-        const { w, d, h } = getBuildingShape(building);
+        const shape = getBuildingShape(building);
 
-        const mesh = MeshBuilder.CreateBox(`bldg-${building.id}`, { width: w, depth: d, height: h }, scene);
+        const bMat = createBuildingPBR(`bmat-${building.id}`, scene, building.type, !!building.isLandmark, accent);
 
-        const bMat = new StandardMaterial(`bmat-${building.id}`, scene);
-        bMat.diffuseColor = accent.scale(building.isLandmark ? 0.7 : 0.55);
-        bMat.emissiveColor = accent.scale(getEmissiveScale(building.type));
-        bMat.specularColor = accent.scale(building.type === 'label' || building.type === 'studio' ? 0.35 : 0.15);
-        mesh.material = bMat;
-        mesh.position.set(bx, h / 2, bz);
+        const { base: mesh, all: meshParts, podShape } = buildCompoundMeshes(scene, building, shape, bx, bz, bMat);
 
         const meta: BuildingMeta = {
           buildingId: building.id,
@@ -966,67 +1401,65 @@ export default function City3D({ navigationState, onNavigate, onReady }: City3DP
         };
         mesh.metadata = meta;
 
-        buildingPositions.current[building.id] = { x: bx, z: bz };
+        // Register door position for proximity detection (front of building)
+        proximityTargets.push({ x: bx, z: bz - shape.d / 2 - 1, d: shape.d, meta });
 
-        // Window overlays, ledge bands, rooftop & ground details
-        addWindowPlanes(scene, bx, bz, { w, d, h }, building.floors, building.id, accent);
-        addLedgeBands(scene, building, { w, d, h }, bx, bz, accent);
-        addRooftopDetails(scene, building, { w, d, h }, bx, bz, accent);
-        addACUnits(scene, building, { w, d, h }, bx, bz);
-        addBuildingLobby(scene, building, { w, d, h }, bx, bz, accent);
+        addWindowPlanes(scene, bx, bz, podShape, building.floors, building.id, accent);
+        addLedgeBands(scene, building, shape, bx, bz, accent);
+        addRooftopDetails(scene, building, shape, bx, bz, accent);
+        addACUnits(scene, building, shape, bx, bz);
+        addBuildingLobby(scene, building, shape, bx, bz, accent);
 
         if (building.isLandmark) {
-          addBuildingSign(scene, building, { w, d, h }, bx, bz, accent);
-          addGroundGlow(scene, building, { w, d, h }, bx, bz, accent);
+          addBuildingSign(scene, building, shape, bx, bz, accent);
+          addGroundGlow(scene, building, shape, bx, bz, accent);
           landmarkMats.push({ mat: bMat, base: bMat.emissiveColor.clone() });
-          shadowGen.addShadowCaster(mesh);
+          meshParts.forEach((m) => shadowGen.addShadowCaster(m));
         }
 
-        // Activity beacon above studios, rooms, and clubs
         if (building.type === 'studio' || building.type === 'room' || building.type === 'club') {
-          addActivityBeacon(scene, building, { w, d, h }, bx, bz, accent, beaconEntries);
+          addActivityBeacon(scene, building, shape, bx, bz, accent, beaconEntries);
         }
 
-        // Erratic neon flicker on clubs + non-landmark studios
         if (building.type === 'club' || (building.type === 'studio' && !building.isLandmark)) {
           const seed = (hashString(building.id + 'flk') >>> 0) / 0xffffffff;
           flickerMats.push({ mat: bMat, base: bMat.emissiveColor.clone(), seed });
         }
-
-        // Hover
-        mesh.actionManager = new ActionManager(scene);
-        mesh.actionManager.registerAction(
-          new ExecuteCodeAction(ActionManager.OnPointerOverTrigger, () => {
-            mesh.scaling.y = 1.05;
-            canvas.style.cursor = 'pointer';
-          })
-        );
-        mesh.actionManager.registerAction(
-          new ExecuteCodeAction(ActionManager.OnPointerOutTrigger, () => {
-            mesh.scaling.y = 1;
-            canvas.style.cursor = 'grab';
-          })
-        );
       });
     });
 
-    // ── Infrastructure & atmosphere ───────────────────────────────────────
+    // ── Infrastructure ────────────────────────────────────────────────────────
+    createCityRingRoad(scene);
     createRoads(scene);
-    createStreetLamps(scene);
-    createStarfield(scene);
+    createStreetLamps(scene, renderProfile);
+    createStarfield(scene, renderProfile);
     DISTRICTS.forEach((d) => createDistrictLabel(scene, d));
-    createDroneTraffic(scene);
+    createDroneTraffic(scene, renderProfile);
 
-    // Pulse / flicker / beacon animations
+    const cars = createStreetCars(scene, renderProfile);
+    const peds = createPedestrians(scene, renderProfile);
+
+    // ── WASD key state ────────────────────────────────────────────────────────
+    const keys: Record<string, boolean> = {};
+    const onKeyDown = (e: KeyboardEvent) => { keys[e.code] = true; };
+    const onKeyUp   = (e: KeyboardEvent) => { keys[e.code] = false; };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup',   onKeyUp);
+
+    // ── Per-frame logic ───────────────────────────────────────────────────────
+    let lastProximityId: string | null = null;
+
     scene.registerBeforeRender(() => {
-      const t = performance.now() / 1000;
+      const t        = performance.now() / 1000;
+      const deltaMs  = engine.getDeltaTime();
+      const delta    = Math.min(deltaMs / 1000, 0.05);
 
-      // Smooth landmark pulse
+      // ── Landmark pulse ────────────────────────────────────────────────────
       landmarkMats.forEach(({ mat, base }, i) => {
-        mat.emissiveColor = base.scale(1 + 0.28 * Math.sin(t * 1.5 + i * 0.85));
+        mat.emissiveColor = base.scale(1 + 0.26 * Math.sin(t * 1.5 + i * 0.85));
       });
 
-      // Erratic neon flicker on clubs & secondary studios
+      // ── Neon flicker ──────────────────────────────────────────────────────
       flickerMats.forEach(({ mat, base, seed }) => {
         const f = 0.76
           + 0.13 * Math.sin(t * 2.4  + seed * 10)
@@ -1035,86 +1468,103 @@ export default function City3D({ navigationState, onNavigate, onReady }: City3DP
         mat.emissiveColor = base.scale(Math.max(0.22, f));
       });
 
-      // Floating beacon pulse
+      // ── Activity beacons ──────────────────────────────────────────────────
       beaconEntries.forEach(({ mesh, mat, base, bx, bz, baseY, phase, speed }) => {
         mesh.position.set(bx, baseY + 0.55 * Math.sin(t * 1.35 + phase), bz);
         const pulse = 0.32 + 0.68 * Math.abs(Math.sin(t * speed + phase));
         mat.emissiveColor = base.scale(0.35 + 1.25 * pulse);
       });
+
+      // ── Car movement ──────────────────────────────────────────────────────
+      cars.forEach((car) => {
+        car.t += delta * car.speed / Vector3.Distance(car.startPos, car.endPos);
+        if (car.t > 1) car.t -= 1;
+        const pos = Vector3.Lerp(car.startPos, car.endPos, car.t);
+        car.body.position.copyFrom(pos);
+        const dir = car.endPos.subtract(car.startPos).normalize();
+        car.body.rotation.y = Math.atan2(dir.x, dir.z);
+      });
+
+      // ── Pedestrian movement ───────────────────────────────────────────────
+      peds.forEach((ped) => {
+        if (ped.pauseT > 0) {
+          ped.pauseT -= delta;
+          return;
+        }
+        ped.t += delta * ped.speed / Math.max(0.1, Vector3.Distance(ped.startPos, ped.endPos));
+        if (ped.t >= 1) {
+          ped.t = 0;
+          ped.pauseT = 1.5 + ped.rng() * 2.5;
+          // pick new random waypoint
+          const angle = ped.rng() * Math.PI * 2;
+          ped.startPos = ped.endPos.clone();
+          ped.endPos = new Vector3(
+            ped.cx + Math.cos(angle) * ped.radius,
+            0.85,
+            ped.cz + Math.sin(angle) * ped.radius
+          );
+        }
+        const pos = Vector3.Lerp(ped.startPos, ped.endPos, ped.t);
+        ped.body.position.copyFrom(pos);
+        const dir = ped.endPos.subtract(ped.startPos);
+        if (dir.length() > 0.01) {
+          ped.body.rotation.y = Math.atan2(dir.x, dir.z);
+        }
+      });
+
+      // ── WASD player movement ──────────────────────────────────────────────
+      const speed = 8.5;
+      const fwd3  = camera.target.subtract(camera.position);
+      fwd3.y = 0;
+      const fwdLen = fwd3.length();
+      if (fwdLen > 0.001) {
+        fwd3.scaleInPlace(1 / fwdLen);
+      }
+      const right3 = Vector3.Cross(Vector3.Up(), fwd3).normalize();
+
+      let moveDir = Vector3.Zero();
+      if (keys['KeyW'] || keys['ArrowUp'])    moveDir.addInPlace(fwd3);
+      if (keys['KeyS'] || keys['ArrowDown'])  moveDir.addInPlace(fwd3.scale(-1));
+      if (keys['KeyA'] || keys['ArrowLeft'])  moveDir.addInPlace(right3.scale(-1));
+      if (keys['KeyD'] || keys['ArrowRight']) moveDir.addInPlace(right3);
+
+      if (moveDir.length() > 0.001) {
+        moveDir.normalize().scaleInPlace(speed * delta);
+        player.moveWithCollisions(moveDir);
+        // face movement direction
+        player.rotation.y = Math.atan2(moveDir.x, moveDir.z);
+      }
+
+      // keep player on ground
+      if (player.position.y < 0.9) player.position.y = 0.9;
+
+      // lock camera target to player
+      camera.target.copyFrom(player.position);
+
+      // ── Proximity detection ───────────────────────────────────────────────
+      const PROX_RADIUS = 7.5;
+      let closestId:   string | null = null;
+      let closestMeta: BuildingMeta | null = null;
+      let closestDist  = PROX_RADIUS;
+
+      for (const pt of proximityTargets) {
+        const dx   = player.position.x - pt.x;
+        const dz   = player.position.z - pt.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestId   = pt.meta.buildingId;
+          closestMeta = pt.meta;
+        }
+      }
+
+      if (closestId !== lastProximityId) {
+        lastProximityId = closestId;
+        onProximityRef.current(closestMeta);
+      }
     });
 
-    // ── Click handling ──────────────────────────────────────────────────
-    scene.onPointerObservable.add((pointerInfo) => {
-      const event = pointerInfo.event as PointerEvent | MouseEvent | undefined;
-
-      if (pointerInfo.type === PointerEventTypes.POINTERDOWN) {
-        if (!event || ('button' in event && event.button !== 0)) {
-          pointerDownRef.current = null;
-          return;
-        }
-
-        pointerDownRef.current = {
-          x: event.clientX,
-          y: event.clientY,
-          time: performance.now(),
-        };
-        return;
-      }
-
-      if (pointerInfo.type !== PointerEventTypes.POINTERPICK) return;
-
-      if (!event) return;
-
-      const pointerDown = pointerDownRef.current;
-      pointerDownRef.current = null;
-
-      if (!pointerDown) return;
-
-      const movedDistance = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
-      const gestureTime = performance.now() - pointerDown.time;
-
-      if (movedDistance > 8 || gestureTime > 650) return;
-
-      const mesh = pointerInfo.pickInfo?.pickedMesh;
-      if (!mesh) return;
-
-      const currentNav = navigationStateRef.current;
-
-      if (mesh.name.startsWith('plate-')) {
-        const districtId = mesh.name.replace('plate-', '') as DistrictId;
-        onNavigateRef.current({
-          mode: 'district',
-          districtId,
-          buildingId: null,
-          buildingName: null,
-          buildingType: null,
-          buildingDescription: null,
-        });
-        return;
-      }
-
-      if (mesh.name.startsWith('bldg-')) {
-        const meta = mesh.metadata as BuildingMeta;
-
-        if (currentNav.mode === 'city') {
-          return;
-        }
-
-        if (currentNav.districtId && meta.districtId !== currentNav.districtId) {
-          return;
-        }
-
-        onNavigateRef.current({
-          mode: 'building',
-          districtId: meta.districtId,
-          buildingId: meta.buildingId,
-          buildingName: meta.buildingName,
-          buildingType: meta.buildingType,
-          buildingDescription: meta.buildingDescription,
-        });
-      }
-    });
-
+    // ── Render loop ───────────────────────────────────────────────────────────
     let firstFrame = true;
     engine.runRenderLoop(() => {
       scene.render();
@@ -1126,50 +1576,19 @@ export default function City3D({ navigationState, onNavigate, onReady }: City3DP
 
     const handleResize = () => engine.resize();
     window.addEventListener('resize', handleResize);
-    canvas.style.cursor = 'grab';
+    canvas.style.cursor = 'default';
 
     return () => {
-      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup',   onKeyUp);
+      window.removeEventListener('resize',  handleResize);
       scene.dispose();
       engine.dispose();
       engineRef.current = null;
-      cameraRef.current = null;
-      sceneRef.current = null;
+      sceneRef.current  = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Camera navigation (reacts to state changes) ───────────────────────
-  useEffect(() => {
-    const camera = cameraRef.current;
-    const scene  = sceneRef.current;
-    if (!camera || !scene) return;
-
-    const { mode, districtId, buildingId } = navigationState;
-
-    if (mode === 'city') {
-      animateCamera(camera, scene, { beta: Math.PI / 3.2, radius: 260, targetX: 0, targetZ: 0 });
-      return;
-    }
-
-    if (mode === 'district' && districtId) {
-      const district = DISTRICTS.find((d) => d.id === districtId);
-      if (!district) return;
-      const { x, z } = districtCenter(district);
-      animateCamera(camera, scene, { beta: Math.PI / 4.2, radius: 95, targetX: x, targetZ: z });
-      return;
-    }
-
-    if ((mode === 'building' || mode === 'interior') && buildingId) {
-      const pos = buildingPositions.current[buildingId];
-      if (!pos) return;
-      animateCamera(camera, scene, { beta: Math.PI / 3.6, radius: 30, targetX: pos.x, targetZ: pos.z });
-    }
-  }, [navigationState]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className={`city-canvas${navigationState.mode === 'interior' ? ' city-canvas--interior' : ''}`}
-    />
-  );
+  return <canvas ref={canvasRef} className="city-canvas" />;
 }
